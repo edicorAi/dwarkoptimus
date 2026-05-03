@@ -11,6 +11,10 @@ export type HardwarePreset = {
   memoryBytesPerGpu: number;
   memoryBandwidthBytesPerSecondPerGpu: number;
   flopsPerByte: number;
+  // Bytes-per-param at the precision flopsPerByte was measured at.
+  // 0.5 = fp4 (Blackwell), 1 = fp8 (Hopper), 2 = bf16 (Ampere/Ada).
+  // Used to rescale roofline math when serving at a different precision than the spec.
+  nativeComputeBytes: number;
   interconnect: Interconnect;
   confidence: Confidence;
   notes: string;
@@ -20,13 +24,18 @@ export type HardwarePreset = {
 export type ModelPreset = {
   id: string;
   label: string;
-  litellmName?: string;
   architecture: Architecture;
   totalParams: number;
   activeParams: number;
   contextTokens: number;
   defaultWeightBytesPerParam: number;
   kvBytesPerToken: number;
+  // Number of experts a single token is routed to (MoE) — used to estimate
+  // scale-up vs scale-out traffic when the deployment crosses racks.
+  activatedExperts?: number;
+  // Approximate transformer layer count. Used for the MoE multi-rack
+  // feasibility check; treated as a rough estimate.
+  approxLayers?: number;
   confidence: Confidence;
   kvConfidence: Confidence;
   notes: string;
@@ -37,12 +46,13 @@ export type ScenarioInputs = {
   hardware: HardwarePreset;
   model: ModelPreset;
   contextTokens: number;
+  // Number of concurrent sequences kept in flight per decode step. This is
+  // the "B" from the roofline lecture and the only concurrency knob.
   batchSize: number;
   weightBytesPerParam: number;
   kvBytesPerToken: number;
   flopsPerByte: number;
   tokensPerSecond: number;
-  desiredConcurrentUsers: number;
   deploymentDays: number;
   pipelineStages: number;
   expertParallelism: number;
@@ -57,6 +67,9 @@ export type ScenarioResult = {
   warnings: string[];
   batchThreshold: number;
   hbmDrainSeconds: number;
+  stepIntervalSeconds: number;
+  derivedTokensPerSecond: number;
+  sparsityRatio: number;
   weightBytesTotal: number;
   kvBytesTotal: number;
   requiredBytesPerGpu: number;
@@ -70,11 +83,11 @@ export type ScenarioResult = {
 };
 
 export type ServingPlan = {
-  requestedConcurrency: number;
-  plannedConcurrency: number;
-  fitsRequestedConcurrency: boolean;
-  maxFittingConcurrency: number;
-  concurrencyHeadroom: number;
+  requestedBatch: number;
+  plannedBatch: number;
+  fitsRequestedBatch: boolean;
+  maxFittingBatch: number;
+  batchHeadroom: number;
   recommendedTensorParallelSize: number;
   recommendedGpuMemoryUtilization: number;
   recommendedMaxModelLen: number;

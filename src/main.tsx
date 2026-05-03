@@ -1,19 +1,54 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { hardwarePresets } from "./data/hardware";
 import { modelPresets } from "./data/models";
-import { buildScenario, calculateScenario, createServingPlan } from "./lib/calculations";
+import {
+  autoOptimize,
+  buildScenario,
+  calculateScenario,
+  createServingPlan,
+  getRooflineSweep,
+} from "./lib/calculations";
+import { buildScenarioReport } from "./lib/report";
+import {
+  cacheHfPreset,
+  clearCachedHfPreset,
+  derivePresetFromHfConfig,
+  loadCachedHfPresets,
+  loadModelConfig,
+  loadSafetensorsTotal,
+  loadStoredHfToken,
+  searchModels,
+  storeHfToken,
+  type HfSearchHit,
+} from "./lib/huggingface";
 import { formatBytes, formatCompact, formatNumber, formatTime } from "./lib/units";
 import type { HardwarePreset, ModelPreset, PrecisionMode, ScenarioInputs, ServingPlan } from "./types";
 import "./styles.css";
 
-type AppTab = "planner" | "advanced" | "settings";
+type AppTab = "planner" | "docs" | "settings";
 
 const precisionModes: Record<PrecisionMode, { label: string; bytes: number | null; note: string }> = {
-  bf16: { label: "BF16 / FP16", bytes: 2, note: "Highest compatibility, largest weight footprint." },
-  fp8: { label: "FP8", bytes: 1, note: "Common serving precision for newer accelerators." },
-  fp4: { label: "FP4 / INT4", bytes: 0.5, note: "Smallest preset footprint; quality and kernel support vary." },
-  custom: { label: "Custom", bytes: null, note: "Use the custom bytes-per-parameter field." },
+  bf16: {
+    label: "BF16 / FP16",
+    bytes: 2,
+    note: "2 bytes/param. Training default and the safest serving choice — full quality, every runtime supports it. Use when accuracy matters more than memory or you can't measure quality loss.",
+  },
+  fp8: {
+    label: "FP8",
+    bytes: 1,
+    note: "1 byte/param. Production-ready on Hopper (H100/H200) and Blackwell. Halves weight memory vs BF16 with a small, well-characterized quality drop. Default for new vLLM deployments.",
+  },
+  fp4: {
+    label: "FP4 / INT4",
+    bytes: 0.5,
+    note: "0.5 bytes/param. Quarters the weight footprint vs BF16. Native on Blackwell tensor cores; emulated elsewhere. Quality varies — validate with your eval set before committing.",
+  },
+  custom: {
+    label: "Custom",
+    bytes: null,
+    note: "For mixed/quantized layouts (AWQ, GPTQ, marlin). Use the custom bytes-per-parameter field below.",
+  },
 };
 
 const kvSliderMin = 512;
@@ -31,9 +66,11 @@ function App() {
   const [batchSize, setBatchSize] = useState(defaultServingBatch);
   const [customWeightBytes, setCustomWeightBytes] = useState(0.5);
   const [kvBytesPerToken, setKvBytesPerToken] = useState(modelPresets[0].kvBytesPerToken);
-  const [tokensPerSecond, setTokensPerSecond] = useState(50e6);
-  const [desiredConcurrentUsers, setDesiredConcurrentUsers] = useState(defaultServingBatch);
+  const [tokensPerSecond, setTokensPerSecond] = useState(0);
   const [deploymentDays, setDeploymentDays] = useState(60);
+  const [hfPresets, setHfPresets] = useState<ModelPreset[]>(() => loadCachedHfPresets());
+  const [optimizeNotes, setOptimizeNotes] = useState<string[] | null>(null);
+  const allModelPresets = useMemo<ModelPreset[]>(() => [...modelPresets, ...hfPresets], [hfPresets]);
   const [pipelineStages, setPipelineStages] = useState(1);
   const [expertParallelism, setExpertParallelism] = useState(8);
   const [safetyMargin, setSafetyMargin] = useState(0.8);
@@ -41,7 +78,7 @@ function App() {
   const visibleHardwarePresets = hardwarePresets.filter((item) => enabledHardwareIds.includes(item.id));
   const plannerHardwarePresets = visibleHardwarePresets.length > 0 ? visibleHardwarePresets : hardwarePresets;
   const hardware = plannerHardwarePresets.find((item) => item.id === hardwareId) ?? plannerHardwarePresets[0];
-  const model = modelPresets.find((item) => item.id === modelId) ?? modelPresets[0];
+  const model = allModelPresets.find((item) => item.id === modelId) ?? allModelPresets[0];
   const weightBytesPerParam = precisionModes[precision].bytes ?? customWeightBytes;
 
   const scenario = useMemo(
@@ -52,7 +89,6 @@ function App() {
         weightBytesPerParam,
         kvBytesPerToken,
         tokensPerSecond,
-        desiredConcurrentUsers,
         deploymentDays,
         pipelineStages,
         expertParallelism,
@@ -66,7 +102,6 @@ function App() {
       weightBytesPerParam,
       kvBytesPerToken,
       tokensPerSecond,
-      desiredConcurrentUsers,
       deploymentDays,
       pipelineStages,
       expertParallelism,
@@ -83,7 +118,6 @@ function App() {
           weightBytesPerParam,
           kvBytesPerToken,
           tokensPerSecond,
-          desiredConcurrentUsers,
           deploymentDays,
           pipelineStages,
           expertParallelism: Math.min(expertParallelism, item.gpuCount),
@@ -99,7 +133,6 @@ function App() {
       weightBytesPerParam,
       kvBytesPerToken,
       tokensPerSecond,
-      desiredConcurrentUsers,
       deploymentDays,
       pipelineStages,
       expertParallelism,
@@ -125,46 +158,65 @@ function App() {
   }
 
   function applyModel(nextId: string) {
-    const next = modelPresets.find((item) => item.id === nextId) ?? modelPresets[0];
+    const next = allModelPresets.find((item) => item.id === nextId) ?? allModelPresets[0];
     setModelId(next.id);
     setContextTokens(next.contextTokens);
     setKvBytesPerToken(next.kvBytesPerToken);
     setBatchSize(defaultServingBatch);
-    setDesiredConcurrentUsers(defaultServingBatch);
     setPrecision(next.defaultWeightBytesPerParam <= 0.5 ? "fp4" : next.defaultWeightBytesPerParam <= 1 ? "fp8" : "bf16");
     setCustomWeightBytes(next.defaultWeightBytesPerParam);
+    setOptimizeNotes(null);
   }
 
-  function exportMarkdown() {
-    const markdown = [
-      `# dwarkoptimus Scenario`,
-      ``,
-      `- Hardware: ${hardware.label}`,
-      `- Model: ${model.label}`,
-      `- Verdict: ${result.verdictLabel}`,
-      `- Reason: ${result.mainReason}`,
-      `- Next action: ${result.nextAction}`,
-      `- Context: ${formatCompact(contextTokens, " tokens")}`,
-      `- Batch: ${formatCompact(batchSize)}`,
-      `- Desired concurrent users: ${formatCompact(desiredConcurrentUsers)}`,
-      `- Max fitting batch at selected context: ${formatCompact(result.maxFittingBatch)}`,
-      `- Weight footprint: ${formatBytes(result.weightBytesTotal)}`,
-      `- KV footprint: ${formatBytes(result.kvBytesTotal)}`,
-      `- Required per GPU: ${formatBytes(result.requiredBytesPerGpu)}`,
-      `- Safety-adjusted available per GPU: ${formatBytes(result.availableBytesPerGpu)}`,
-      ``,
-      `## Warnings`,
-      ...result.warnings.map((warning) => `- ${warning}`),
-    ].join("\n");
-    void navigator.clipboard?.writeText(markdown);
+  function applyAutoOptimize() {
+    const out = autoOptimize(hardware, model, {
+      contextTokens,
+      weightBytesPerParam,
+      kvBytesPerToken,
+      batchSize,
+      expertParallelism,
+      pipelineStages,
+      safetyMargin,
+    });
+    // Hardware, model, context, and weight precision are user-fixed — auto-optimize
+    // only changes batch, KV cache, EP, PP, and safety margin.
+    setKvBytesPerToken(out.overrides.kvBytesPerToken);
+    setBatchSize(out.overrides.batchSize);
+    setExpertParallelism(out.overrides.expertParallelism);
+    setPipelineStages(out.overrides.pipelineStages);
+    setSafetyMargin(out.overrides.safetyMargin);
+    setOptimizeNotes(out.rationale);
+  }
+
+  function buildReport(): string {
+    return buildScenarioReport({ hardware, model, scenario, result, plan: servingPlan });
+  }
+
+  function copyReport() {
+    void navigator.clipboard?.writeText(buildReport());
+  }
+
+  function downloadReport() {
+    const md = buildReport();
+    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const slug = `${hardware.id}_${model.id}`.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const date = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `dwarkoptimus-${slug}-${date}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   return (
     <main className="app-shell">
       <nav className="top-nav" aria-label="Primary">
-        {(["planner", "advanced", "settings"] as AppTab[]).map((tab) => (
+        {(["planner", "docs", "settings"] as AppTab[]).map((tab) => (
           <button key={tab} type="button" className={activeTab === tab ? "active" : ""} onClick={() => setActiveTab(tab)}>
-            {tab === "planner" ? "Planner" : tab === "advanced" ? "Advanced" : "Settings"}
+            {tab === "planner" ? "Planner" : tab === "docs" ? "Docs" : "Settings"}
           </button>
         ))}
       </nav>
@@ -172,14 +224,15 @@ function App() {
       <header className="hero">
         <div>
           <p className="eyebrow">dwarkoptimus</p>
-          <h1>Plan model serving on your GPUs</h1>
+          <h1>Roofline math for serving LLMs on real GPUs</h1>
           <p className="dek">
-            Pick a model and the NVIDIA hardware in your inventory. The app turns roofline math into a fit verdict,
-            bottleneck explanation, and next action.
+            Pick a model and the hardware you actually have. Get a fit verdict, the real bottleneck
+            (compute, weight bandwidth, or KV cache), the break-even batch size, and a vLLM command
+            you can paste — backed by the same roofline math from Reiner Pope's blackboard lecture.
           </p>
         </div>
         <div className="hero-card">
-          <span>Default view</span>
+          <span>Right now</span>
           <strong>{hardware.label}</strong>
           <small>{model.label}</small>
         </div>
@@ -188,7 +241,28 @@ function App() {
       {activeTab === "planner" && (
         <section className="layout">
           <aside className="input-panel">
-            <SectionTitle title="Plan a deployment" />
+            <div className="panel-heading planner-heading">
+              <h2 className="section-title">Plan a deployment</h2>
+              <button type="button" className="primary-button" onClick={applyAutoOptimize}>
+                ⚡ Auto-optimize
+              </button>
+            </div>
+            <FieldHint>
+              Pick your hardware, model, context, and weight precision — those stay fixed. Auto-optimize then tunes batch, KV cache (with fp8 quantization if needed), parallelism, and safety margin to fit and minimize per-token cost.
+            </FieldHint>
+            {optimizeNotes && optimizeNotes.length > 0 && (
+              <div className="optimize-notes">
+                <strong>Auto-optimize applied</strong>
+                <ul>
+                  {optimizeNotes.map((note) => (
+                    <li key={note}>{note}</li>
+                  ))}
+                </ul>
+                <button type="button" className="link-button" onClick={() => setOptimizeNotes(null)}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <Field label="Hardware" help="Only hardware enabled in Settings appears here. Use Settings to match the planner to your inventory.">
               <select value={hardware.id} onChange={(event) => applyHardware(event.target.value)}>
                 {plannerHardwarePresets.map((item) => (
@@ -198,36 +272,81 @@ function App() {
                 ))}
               </select>
             </Field>
-            <Field label="Model" help="These names match the LiteLLM config. Some parameters are source-backed, while KV values are often estimates.">
+            <Field label="Model" help="Curated presets cover the popular open-weights models. Use the Hugging Face search below to import any other model — KV cache size and context length are read directly from its config.json.">
               <select value={modelId} onChange={(event) => applyModel(event.target.value)}>
-                {modelPresets.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.label}
-                  </option>
-                ))}
+                <optgroup label="Curated presets">
+                  {modelPresets.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label}
+                    </option>
+                  ))}
+                </optgroup>
+                {hfPresets.length > 0 && (
+                  <optgroup label="Imported from Hugging Face">
+                    {hfPresets.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        🤗 {item.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </Field>
-            <NumberField label="Desired concurrent users" value={desiredConcurrentUsers} min={1} max={10000} step={1} onChange={setDesiredConcurrentUsers} help="How many live sequences/users you want this deployment to support at the selected context length." />
-            <NumberField label="Context tokens" value={contextTokens} min={512} max={Math.max(model.contextTokens * 2, 8192)} step={512} onChange={setContextTokens} help="Prompt plus history length. Larger values increase KV cache pressure." />
-            <NumberField label="Serving batch" value={batchSize} min={1} max={Math.max(result.maxFittingBatch * 2, result.batchThreshold, 1024)} step={1} onChange={setBatchSize} help="Concurrent sequences kept in flight for one decode step. This is a serving choice, not the theoretical weight-amortization threshold." />
-          </aside>
+            <HuggingFaceSearch
+              onImport={(preset) => {
+                cacheHfPreset(preset);
+                setHfPresets((current) => {
+                  const without = current.filter((item) => item.id !== preset.id);
+                  return [preset, ...without];
+                });
+                setModelId(preset.id);
+                setContextTokens(preset.contextTokens);
+                setKvBytesPerToken(preset.kvBytesPerToken);
+                setBatchSize(defaultServingBatch);
+                setPrecision(
+                  preset.defaultWeightBytesPerParam <= 0.5
+                    ? "fp4"
+                    : preset.defaultWeightBytesPerParam <= 1
+                      ? "fp8"
+                      : "bf16",
+                );
+                setCustomWeightBytes(preset.defaultWeightBytesPerParam);
+              }}
+              onForget={(presetId) => {
+                clearCachedHfPreset(presetId);
+                setHfPresets((current) => current.filter((item) => item.id !== presetId));
+                if (modelId === presetId) {
+                  setModelId(modelPresets[0].id);
+                }
+              }}
+              importedIds={hfPresets.map((p) => p.id)}
+            />
+            <NumberField
+              label="Context tokens"
+              value={contextTokens}
+              min={512}
+              max={Math.max(model.contextTokens * 2, 8192)}
+              step={512}
+              onChange={setContextTokens}
+              help="Prompt plus history length. Larger values increase KV cache pressure."
+            />
+            <NumberField
+              label="Batch (concurrent sequences)"
+              value={batchSize}
+              min={1}
+              max={Math.max(result.maxFittingBatch * 2, result.batchThreshold, 1024)}
+              step={1}
+              onChange={setBatchSize}
+              help="How many users are decoded together in one step. This is the only concurrency knob — vLLM's --max-num-seqs comes from here."
+            />
 
-          <section className="content">
-            <VerdictCard result={result} scenario={scenario} />
-            <PlanningPanel plan={servingPlan} onApply={() => setBatchSize(servingPlan.plannedConcurrency)} />
-            <MetricGrid result={result} scenario={scenario} />
-            <ComparisonTable rows={comparison} selectedHardwareId={hardware.id} />
-          </section>
-        </section>
-      )}
+            <SectionTitle title="More controls" />
 
-      {activeTab === "advanced" && (
-        <section className="layout">
-          <aside className="input-panel">
-            <SectionTitle title="Model memory" />
-            <KvBytesField value={kvBytesPerToken} onChange={setKvBytesPerToken} />
             <div className="field">
-              <label>Weight precision <Help text="Sets bytes per parameter for weight memory. FP4/INT4 is about 0.5 bytes, FP8 is 1 byte, BF16 is 2 bytes." /></label>
+              <label>Weight precision</label>
+              <FieldHint>
+                Bytes used to store each model parameter. Smaller precision shrinks the weight footprint linearly (FP4 is ¼ the size of BF16) and unlocks more tensor-core throughput on hardware that supports it — but quality and kernel maturity get worse as you go down. Pick the smallest precision your model card and runtime actually support.
+              </FieldHint>
               <div className="segmented">
                 {(Object.keys(precisionModes) as PrecisionMode[]).map((mode) => (
                   <button key={mode} type="button" className={mode === precision ? "active" : ""} onClick={() => setPrecision(mode)}>
@@ -236,29 +355,91 @@ function App() {
                 ))}
               </div>
               <small>{precisionModes[precision].note}</small>
+              <PrecisionExplainer
+                weightBytesPerParam={weightBytesPerParam}
+                hardware={hardware}
+                model={model}
+              />
             </div>
             {precision === "custom" && (
               <NumberField label="Custom bytes / param" value={customWeightBytes} min={0.1} max={4} step={0.1} onChange={setCustomWeightBytes} help="Manual storage precision for weights." />
             )}
-
-            <SectionTitle title="Inference and training" />
-            <NumberField label="Tokens / second" value={tokensPerSecond} min={0} max={1e9} step={1e6} onChange={setTokensPerSecond} help="Expected serving rate for this model. Used for lifetime inference-token estimates." />
-            <NumberField label="Deployment days" value={deploymentDays} min={1} max={365} step={1} onChange={setDeploymentDays} help="How long the model serves traffic before replacement." />
-            <NumberField label="Pipeline stages" value={pipelineStages} min={1} max={Math.max(1, hardware.gpuCount)} step={1} onChange={setPipelineStages} help="Sequential model partitions. Helps weight capacity but does not magically remove KV pressure." />
-            <NumberField label="Expert parallelism" value={expertParallelism} min={1} max={hardware.gpuCount} step={1} onChange={setExpertParallelism} help="How many GPUs shard experts or weights within a stage." />
-            <NumberField label="Safety margin" value={safetyMargin} min={0.5} max={1} step={0.05} onChange={setSafetyMargin} help="Fraction of HBM you are willing to plan against. Lower values leave more runtime headroom." />
+            <KvBytesField value={kvBytesPerToken} onChange={setKvBytesPerToken} />
+            <NumberField
+              label="Pipeline stages"
+              value={pipelineStages}
+              min={1}
+              max={Math.max(1, hardware.gpuCount)}
+              step={1}
+              onChange={setPipelineStages}
+              help="Splits the model across racks. Saves weight memory per rack but does not reduce step time, and KV pressure does not shrink because micro-batches grow with depth. Usually left at 1 inside one NVLink domain."
+            />
+            <NumberField
+              label="Expert parallelism"
+              value={expertParallelism}
+              min={1}
+              max={hardware.gpuCount}
+              step={1}
+              onChange={setExpertParallelism}
+              help="How many GPUs shard experts (MoE) or weights (dense) within a stage."
+            />
+            <NumberField
+              label="Safety margin"
+              value={safetyMargin}
+              min={0.5}
+              max={1}
+              step={0.05}
+              onChange={setSafetyMargin}
+              help="Fraction of HBM you plan against. Reused as vLLM's --gpu-memory-utilization."
+            />
+            <NumberField
+              label="Deployment days"
+              value={deploymentDays}
+              min={1}
+              max={365}
+              step={1}
+              onChange={setDeploymentDays}
+              help="Model serving lifetime. Only affects the Chinchilla coverage tile."
+            />
+            <NumberField
+              label="Tokens / second (override)"
+              value={tokensPerSecond}
+              min={0}
+              max={1_000_000}
+              step={100}
+              onChange={setTokensPerSecond}
+              help="Leave at 0 to use the derived pool throughput (batch ÷ step). Override only if you have a measured rate."
+            />
           </aside>
 
           <section className="content">
+            <VerdictCard result={result} scenario={scenario} />
+            <PlanningPanel
+              plan={servingPlan}
+              onApply={() => {
+                const target = Math.max(1, Math.floor(servingPlan.maxFittingBatch));
+                if (Number.isFinite(target) && target > 0) setBatchSize(target);
+              }}
+            />
             <MetricGrid result={result} scenario={scenario} />
             <div className="chart-grid">
-              <MemoryChart result={result} />
-              <LatencyChart scenario={scenario} />
+              <MemoryChart result={result} hardware={hardware} />
+              <LatencyChart scenario={scenario} batchThreshold={result.batchThreshold} />
+              <CostChart scenario={scenario} batchThreshold={result.batchThreshold} />
             </div>
-            <Assumptions hardware={hardware} model={model} result={result} onExport={exportMarkdown} />
+            <ComparisonTable rows={comparison} selectedHardwareId={hardware.id} />
+            <Assumptions
+              hardware={hardware}
+              model={model}
+              result={result}
+              onCopyReport={copyReport}
+              onDownloadReport={downloadReport}
+            />
           </section>
         </section>
       )}
+
+      {activeTab === "docs" && <DocsPanel />}
 
       {activeTab === "settings" && (
         <SettingsPanel
@@ -274,6 +455,601 @@ function App() {
 
 function SectionTitle({ title }: { title: string }) {
   return <h2 className="section-title">{title}</h2>;
+}
+
+function DocsPanel() {
+  return (
+    <section className="docs-shell">
+      <article className="panel docs-intro">
+        <p className="eyebrow">Documentation</p>
+        <h2>How dwarkoptimus models LLM serving</h2>
+        <p>
+          Everything in this calculator comes from the roofline math in Reiner Pope's blackboard
+          lecture on Dwarkesh Podcast (
+          <a href="https://www.dwarkesh.com/p/reiner-pope" target="_blank" rel="noreferrer noopener">
+            transcript
+          </a>
+          ,{" "}
+          <a href="https://youtu.be/xmkSf5IS-zw" target="_blank" rel="noreferrer noopener">
+            video
+          </a>
+          ). This page is a single-scroll reference for every concept, knob, and metric the app
+          surfaces — so you can use the Planner without context-switching to figure out what a number
+          means.
+        </p>
+      </article>
+
+      <DocsToc />
+
+      <div className="docs-content">
+      <DocSection id="overview" title="What this app does">
+        <p>
+          You pick the GPU hardware you actually have and the LLM you want to serve. dwarkoptimus
+          tells you four things, in plain language:
+        </p>
+        <ul>
+          <li>
+            <strong>Will it fit?</strong> Per-GPU memory pressure with a safety margin, with a
+            green / yellow / red verdict.
+          </li>
+          <li>
+            <strong>Where's the bottleneck?</strong> Compute, weight bandwidth, or KV cache
+            memory.
+          </li>
+          <li>
+            <strong>How big should the batch be?</strong> The break-even batch from roofline math
+            and the largest batch HBM allows.
+          </li>
+          <li>
+            <strong>What flags should I pass to vLLM?</strong> A copy-pasteable{" "}
+            <code>vllm serve</code> command with the parallelism, memory, and KV settings derived
+            from the verdict.
+          </li>
+        </ul>
+        <p>
+          The math is the same on every page; the Planner is just the UI that surfaces it. The pure
+          calculation engine lives in <code>src/lib/calculations.ts</code> and is unit-tested
+          directly.
+        </p>
+      </DocSection>
+
+      <DocSection id="roofline" title="The roofline model (one-liner physics)">
+        <p>
+          One decode step on a GPU pool takes whichever is larger of two times: how long compute
+          takes, and how long memory traffic takes.
+        </p>
+        <pre className="docs-code">{`t_compute = 2 × batch × active_params / FLOPs_peak
+t_memory  = (weight_bytes + batch × context × kv_bytes_per_token) / bandwidth
+step_time = max(t_compute, t_memory)`}</pre>
+        <p>
+          Two consequences fall out immediately:
+        </p>
+        <ul>
+          <li>
+            <strong>Latency floor.</strong> The weight-fetch term is constant in batch (you load
+            the model once per step regardless of how many users are batched together), so step
+            time has a floor. That's the dashed grey line in the latency chart.
+          </li>
+          <li>
+            <strong>Cost floor.</strong> Per-token cost is{" "}
+            <code>step_time / batch</code>. As batch grows, the weight-fetch term divides out and
+            cost flattens at the compute-bound floor. That's the cost-per-token chart's tail.
+          </li>
+        </ul>
+      </DocSection>
+
+      <DocSection id="break-even" title="Break-even batch (the most-cited formula)">
+        <p>
+          The smallest batch where compute time meets memory time. Below it, you're paying full
+          weight-fetch cost per token; above it, your tensor cores are saturated and per-token
+          cost doesn't keep dropping.
+        </p>
+        <pre className="docs-code">{`break_even_batch = flops_per_byte
+                 × (total_params / active_params)
+                 × (native_compute_bytes / weight_bytes_per_param)`}</pre>
+        <ul>
+          <li>
+            <code>flops_per_byte</code> is a hardware constant (peak FLOPs at native precision /
+            HBM bandwidth) — about <strong>300 on Hopper bf16</strong>,{" "}
+            <strong>590 on H100 fp8</strong>, <strong>1875 on Blackwell fp4</strong>.
+          </li>
+          <li>
+            <code>total_params / active_params</code> is the model's <strong>sparsity ratio</strong>
+            : 1 for dense models, ~30 for DeepSeek-style large MoEs.
+          </li>
+          <li>
+            The third term scales the threshold by precision: serving fp8 weights on fp4 hardware
+            cuts the threshold in half (less compute available per byte read).
+          </li>
+        </ul>
+        <p>
+          Reiner's lecture: "<em>This actually gives you a ballpark which is remarkably accurate
+          to practice.</em>" For DeepSeek V3 (671B/37B at bf16) on H800, this works out to ~5.4K.
+          For Qwen3-Coder-Next on B300 fp4, it's ~50K.
+        </p>
+      </DocSection>
+
+      <DocSection id="step-interval" title="Step interval and the 'train departs every X ms' framing">
+        <p>
+          The natural cadence of decode steps equals the time to read all of HBM once:
+        </p>
+        <pre className="docs-code">step_interval ≈ HBM_capacity / bandwidth</pre>
+        <p>
+          For a B300 (288 GB / 8 TB/s) it's ~36 ms; for an H200 (141 GB / 4.8 TB/s) it's ~29 ms.
+          Faster is physically impossible (you can't read all weights in less time than bandwidth
+          allows). Slower would mean the GPU is sitting on its FLOPs idle.
+        </p>
+        <p>
+          From this falls a useful derived quantity:
+        </p>
+        <pre className="docs-code">pool_throughput ≈ batch / step_interval</pre>
+        <p>
+          That's why the Planner lets you leave Tokens / second at 0 — it derives the realistic
+          rate for your batch and hardware, then uses it for Chinchilla coverage.
+        </p>
+      </DocSection>
+
+      <DocSection id="kv-cache" title="KV cache: usually the limiting factor">
+        <p>
+          During autoregressive decode, every previously generated token contributes a per-layer
+          K and V vector that must be re-read on every step. Per token, that's:
+        </p>
+        <pre className="docs-code">kv_bytes_per_token = 2 × layers × kv_heads × head_dim × dtype_bytes</pre>
+        <p>
+          For a Llama-3-8B with 32 layers × 8 KV heads × 128 head_dim × 2 (bf16) = <strong>128
+          KB/token</strong>. Multiply by context length and batch and KV cache typically dwarfs
+          weights at long context. That's why the auto-optimize button reaches for{" "}
+          <code>--kv-cache-dtype fp8</code> as a fit-of-last-resort: halving KV bytes/token is the
+          single highest-leverage memory move in vLLM.
+        </p>
+        <p>
+          Some architectures cut this dramatically:
+        </p>
+        <ul>
+          <li>
+            <strong>MLA</strong> (DeepSeek V3, Mistral Large 3, Kimi K2): replace K/V with a small
+            shared latent (~512 dim) plus a positional rope head. KV ends up around 70 KB/token at
+            fp8 even for a 1T-param model.
+          </li>
+          <li>
+            <strong>Sliding-window attention</strong> (Gemma): only the last N tokens hold full
+            KV — older tokens drop out. Effective KV is bounded.
+          </li>
+          <li>
+            <strong>Hybrid Mamba/transformer</strong> (Nemotron-3-Super, MiniMax): only
+            attention layers contribute KV; Mamba layers carry a small fixed state. Roughly halves
+            real KV.
+          </li>
+        </ul>
+      </DocSection>
+
+      <DocSection id="memory-fit" title="Memory fit (per GPU, with safety margin)">
+        <p>
+          The model's total memory footprint is sharded across the GPU pool. Fit is decided{" "}
+          <em>per GPU</em> because each card is its own HBM domain — a 2 TB total demand fails on
+          8× 288 GB GPUs even though pool capacity is 2.3 TB, if 250 GB lands on one card.
+        </p>
+        <pre className="docs-code">{`required_per_gpu = (weight_bytes + kv_bytes) / (EP × PP)
+available_per_gpu = HBM × safety_margin
+utilization = required_per_gpu / available_per_gpu`}</pre>
+        <p>
+          The "Memory fit" panel surfaces both per-GPU and pool-wide totals because conflating
+          them is the most common confusion.
+        </p>
+      </DocSection>
+
+      <DocSection id="bottleneck" title="Bottleneck classifier">
+        <p>For decoder workloads the verdict tile reports one of three:</p>
+        <ul>
+          <li>
+            <strong>kv-memory</strong> — KV cache exceeds 1.4× weight memory. Long context with
+            full attention. Try shorter context, KV quantization, or an MLA model.
+          </li>
+          <li>
+            <strong>weight-memory</strong> — total memory traffic dominates the compute side of
+            the roofline. You're below the break-even batch, so the GPU spends most of its time
+            streaming weights. Bump batch, drop precision, or accept that you're below traffic
+            volume to amortize.
+          </li>
+          <li>
+            <strong>compute</strong> — past the break-even batch, you're compute-bound and
+            per-token cost stops dropping. Healthy operating point.
+          </li>
+        </ul>
+        <p>
+          For embedding and VLM presets the verdict is <strong>not-applicable</strong>: KV-cache
+          decode math doesn't describe their workload.
+        </p>
+      </DocSection>
+
+      <DocSection id="metrics" title="Every metric tile, explained">
+        <dl className="docs-dl">
+          <dt>Memory used / GPU</dt>
+          <dd>
+            <code>required_per_gpu</code>; the percentage is of the safety-adjusted available
+            HBM.
+          </dd>
+
+          <dt>Max users at this context</dt>
+          <dd>
+            Largest batch HBM allows at the chosen context. Different from the break-even batch:
+            this is a capacity ceiling, not an efficiency target.
+          </dd>
+
+          <dt>Break-even batch</dt>
+          <dd>
+            Cost-optimal batch from the roofline. Going above doesn't make per-token cost drop
+            further; going below makes it climb.
+          </dd>
+
+          <dt>Step interval</dt>
+          <dd>
+            Time per decode step ≈ <code>HBM_capacity / bandwidth</code>. Lower bound on latency
+            per generated token.
+          </dd>
+
+          <dt>Pool throughput (derived)</dt>
+          <dd>
+            <code>batch / step_interval</code>. The realistic peak token-rate for the whole pool
+            at the current batch.
+          </dd>
+
+          <dt>Sparsity</dt>
+          <dd>
+            <code>total_params / active_params</code>. 1× for dense models. Sets how high the
+            break-even batch must go: a 30× sparse MoE wants 30× the batch to amortize its
+            weight reads.
+          </dd>
+
+          <dt>HBM drain time</dt>
+          <dd>
+            Time to read every weight in HBM once. Equals step interval; named separately because
+            it's the more familiar physics number.
+          </dd>
+
+          <dt>Chinchilla coverage</dt>
+          <dd>
+            <code>inference_tokens / (20 × active_params)</code>. 1× means you'll serve as many
+            tokens as a Chinchilla-optimal training run for this active-param size. Modern
+            frontier deployments hit 100× and up — the over-training case Reiner discusses in the
+            RL section of the lecture.
+          </dd>
+        </dl>
+      </DocSection>
+
+      <DocSection id="inputs" title="Every input, explained">
+        <dl className="docs-dl">
+          <dt>Hardware</dt>
+          <dd>
+            One GPU pool from the curated list (filterable in Settings). Each preset carries{" "}
+            <code>flops_per_byte</code> at the hardware's native precision, plus a{" "}
+            <code>nativeComputeBytes</code> field used to scale the break-even formula when you
+            pick a different weight precision.
+          </dd>
+
+          <dt>Model</dt>
+          <dd>
+            Either a curated preset or a Hugging Face import. HF imports read{" "}
+            <code>config.json</code> directly and compute KV bytes/token exactly from{" "}
+            <code>num_hidden_layers × num_key_value_heads × head_dim × dtype_bytes</code>.
+          </dd>
+
+          <dt>Context tokens</dt>
+          <dd>
+            Prompt + history length. Larger values make the KV cache term grow linearly per
+            sequence.
+          </dd>
+
+          <dt>Batch (concurrent sequences)</dt>
+          <dd>
+            How many users are decoded together each step. The only concurrency knob — the vLLM
+            command's <code>--max-num-seqs</code> comes from here.
+          </dd>
+
+          <dt>Weight precision</dt>
+          <dd>
+            Bytes per parameter when storing weights. FP4 ≈ 0.5, FP8 ≈ 1, BF16 ≈ 2. Smaller
+            shrinks the weight footprint linearly and unlocks more tensor-core throughput on
+            hardware that supports it natively. Outside native precision, kernels dequantize on
+            the fly.
+          </dd>
+
+          <dt>KV bytes / token</dt>
+          <dd>
+            Effective per-token KV cache bytes after any quantization or attention-architecture
+            tricks. Use the slider when you know something the model card doesn't (e.g. you'll
+            run with <code>--kv-cache-dtype fp8</code>, or it's an MLA / sliding-window model).
+          </dd>
+
+          <dt>Pipeline stages</dt>
+          <dd>
+            Splits the model across racks. Saves weight memory per rack but does <em>not</em>{" "}
+            reduce step time, and KV pressure doesn't shrink because micro-batches grow with
+            depth. Usually 1 inside a single NVLink domain.
+          </dd>
+
+          <dt>Expert parallelism</dt>
+          <dd>
+            How many GPUs shard MoE experts (or, for dense models, weights generally) within a
+            stage. Default = full GPU count.
+          </dd>
+
+          <dt>Safety margin</dt>
+          <dd>
+            Fraction of HBM you'll plan against. Reused as vLLM's{" "}
+            <code>--gpu-memory-utilization</code> flag in the suggested command.
+          </dd>
+
+          <dt>Tokens / second (override)</dt>
+          <dd>
+            Leave at 0 to use the derived pool throughput. Override only if you have a measured
+            serving rate from production traces. Used for Chinchilla coverage only.
+          </dd>
+
+          <dt>Deployment days</dt>
+          <dd>
+            Model serving lifetime. Only affects Chinchilla coverage.
+          </dd>
+        </dl>
+      </DocSection>
+
+      <DocSection id="auto-optimize" title="Auto-optimize: what it does and doesn't touch">
+        <p>
+          One green button at the top of the Planner. Treats your hardware, model, context, and
+          weight precision as user-fixed; tunes everything else.
+        </p>
+        <ul>
+          <li>
+            Sets <strong>expert parallelism</strong> = full GPU count (use the whole NVLink
+            domain).
+          </li>
+          <li>
+            Resets <strong>pipeline stages</strong> to 1 (PP doesn't help latency).
+          </li>
+          <li>
+            Sets <strong>safety margin</strong> to 0.85 (~15% HBM headroom).
+          </li>
+          <li>
+            <strong>KV quantization fallback:</strong> only when the workload doesn't fit and the
+            weights themselves do fit, halve KV bytes/token (models{" "}
+            <code>--kv-cache-dtype fp8</code>). If still no fit, quarter (4-bit KV).
+          </li>
+          <li>
+            Picks <strong>batch</strong> = <code>min(break_even, max_fitting)</code>. Cost-optimal
+            when HBM has room; clamped to fit otherwise.
+          </li>
+        </ul>
+        <p>
+          When even maxed-KV-quantization can't fit, Auto-optimize doesn't silently reduce context
+          or precision — it tells you those are inputs <em>you</em> control. Stay in charge of
+          decisions that affect quality.
+        </p>
+      </DocSection>
+
+      <DocSection id="vllm-command" title="The suggested vLLM command">
+        <p>
+          The <em>Suggested vLLM config</em> panel emits a copy-pasteable{" "}
+          <code>vllm serve</code> command derived from your scenario. Each flag maps to one
+          calculator field:
+        </p>
+        <ul>
+          <li>
+            <code>--tensor-parallel-size</code> ← <code>gpu_count / pipeline_stages</code>
+          </li>
+          <li>
+            <code>--pipeline-parallel-size</code> ← only emitted when PP &gt; 1
+          </li>
+          <li>
+            <code>--max-model-len</code> ← context tokens
+          </li>
+          <li>
+            <code>--gpu-memory-utilization</code> ← safety margin
+          </li>
+          <li>
+            <code>--max-num-seqs</code> ← batch (concurrent sequences)
+          </li>
+          <li>
+            <code>--max-num-batched-tokens</code> ← capped at 1M to avoid aggressive long-prefill
+            defaults
+          </li>
+          <li>
+            <code>--kv-cache-dtype fp8</code> ← only when KV bytes/token is below ~75% of the
+            model's preset value (Auto-optimize triggers this)
+          </li>
+          <li>
+            <code>--enable-prefix-caching</code> ← always on (cached input tokens are ~10× cheaper)
+          </li>
+        </ul>
+      </DocSection>
+
+      <DocSection id="hf-import" title="Hugging Face import">
+        <p>
+          The search box under the Model dropdown queries{" "}
+          <code>huggingface.co/api/models</code>. Each result shows downloads, likes, and a 🔒
+          gated badge if the repo requires license acceptance. Clicking <strong>Import</strong>:
+        </p>
+        <ol>
+          <li>
+            Fetches <code>config.json</code> from{" "}
+            <code>huggingface.co/&lt;repo&gt;/resolve/main/config.json</code>.
+          </li>
+          <li>
+            Reads <code>safetensors.total</code> (when published) for an authoritative param
+            count, otherwise estimates from <code>hidden_size × layers × intermediate_size</code>.
+          </li>
+          <li>
+            Computes KV bytes/token <em>exactly</em> from{" "}
+            <code>2 × layers × kv_heads × head_dim × dtype_bytes</code> — no estimation.
+          </li>
+          <li>
+            Saves the derived preset to <code>localStorage</code> (key prefix{" "}
+            <code>dwarkoptimus.hf-preset.</code>), so it survives reloads.
+          </li>
+        </ol>
+        <p>
+          Gated repos (Llama, Gemma) need an HF access token: paste one into the field that
+          appears on import failure. The token is stored in localStorage and reused for search +
+          config fetches.
+        </p>
+      </DocSection>
+
+      <DocSection id="report" title="Markdown report">
+        <p>
+          The <strong>Download report</strong> button in Assumptions exports a self-contained
+          markdown file: verdict, hardware, model, configuration, memory fit (per-GPU + pool),
+          roofline metrics, the vLLM command, all warnings, and a methodology section with the
+          formulas. Filename:{" "}
+          <code>dwarkoptimus-{"<hardware>_<model>"}-YYYY-MM-DD.md</code>.
+        </p>
+        <p>
+          Use <strong>Copy report</strong> to put the same content on the clipboard for
+          pasting into a doc.
+        </p>
+      </DocSection>
+
+      <DocSection id="confidence" title="Confidence badges">
+        <p>Each model and hardware preset carries one of four confidence levels:</p>
+        <dl className="docs-dl">
+          <dt>source-backed</dt>
+          <dd>Direct from a vendor spec sheet or model card.</dd>
+          <dt>estimated</dt>
+          <dd>Derived from architecture details (e.g. KV bytes computed from layers × heads).</dd>
+          <dt>user-provided</dt>
+          <dd>Local hardware inventory or operator override.</dd>
+          <dt>unknown</dt>
+          <dd>Placeholder pending validation.</dd>
+        </dl>
+        <p>
+          The Assumptions panel shows them as colored pills; the markdown report carries them too.
+          Always check before turning a verdict into a deployment decision.
+        </p>
+      </DocSection>
+
+      <DocSection id="glossary" title="Glossary">
+        <dl className="docs-dl">
+          <dt>Active params</dt>
+          <dd>Parameters touched by a single token. Equals total params for dense models; smaller for MoE.</dd>
+          <dt>BF16 / FP16 / FP8 / FP4</dt>
+          <dd>Floating-point precisions: 2, 2, 1, 0.5 bytes per parameter respectively.</dd>
+          <dt>Chinchilla optimum</dt>
+          <dd>~20 training tokens per parameter (Hoffmann et al. 2022). The "coverage" tile compares serving lifetime to that benchmark.</dd>
+          <dt>Decode</dt>
+          <dd>The autoregressive step where the model produces one new token by reading the full KV history.</dd>
+          <dt>FLOPs/byte</dt>
+          <dd>Hardware ratio: peak FLOPs at native precision divided by memory bandwidth. Sets the break-even batch.</dd>
+          <dt>GQA — Grouped-Query Attention</dt>
+          <dd>KV heads &lt; query heads, sharing K and V across groups. Cuts KV cache by the head ratio.</dd>
+          <dt>HBM</dt>
+          <dd>High-Bandwidth Memory — the on-package GPU memory whose capacity and bandwidth drive most of this calculator.</dd>
+          <dt>MLA — Multi-head Latent Attention</dt>
+          <dd>DeepSeek's KV trick: replace K/V with a tiny shared latent + positional rope head. Slashes KV cache by ~10×.</dd>
+          <dt>MoE — Mixture of Experts</dt>
+          <dd>Each token activates a small subset of FFN expert sub-networks. Increases total params at fixed compute.</dd>
+          <dt>NVLink / scale-up</dt>
+          <dd>Fast intra-rack interconnect (~8× faster than scale-out network). All-to-all MoE traffic strongly prefers staying inside one NVLink domain.</dd>
+          <dt>Pipeline parallelism (PP)</dt>
+          <dd>Different layers on different GPUs, processed sequentially. Saves capacity, doesn't reduce step time.</dd>
+          <dt>Prefill</dt>
+          <dd>The pass over the input prompt before decode begins. Compute-bound and amenable to large effective batches.</dd>
+          <dt>Sparsity ratio</dt>
+          <dd>total_params / active_params. The factor by which the break-even batch grows.</dd>
+          <dt>Tensor parallelism (TP)</dt>
+          <dd>Sharding individual matmuls across GPUs in a single layer. The default vLLM parallel dimension.</dd>
+        </dl>
+      </DocSection>
+
+      <DocSection id="sources" title="Sources">
+        <ul>
+          <li>
+            <a href="https://www.dwarkesh.com/p/reiner-pope" target="_blank" rel="noreferrer noopener">
+              Reiner Pope on Dwarkesh Podcast — full transcript
+            </a>
+          </li>
+          <li>
+            <a href="https://youtu.be/xmkSf5IS-zw" target="_blank" rel="noreferrer noopener">
+              Same lecture on YouTube
+            </a>
+          </li>
+          <li>
+            <a href="https://en.wikipedia.org/wiki/Roofline_model" target="_blank" rel="noreferrer noopener">
+              Roofline model — Wikipedia
+            </a>
+          </li>
+          <li>
+            <a href="https://arxiv.org/abs/2203.15556" target="_blank" rel="noreferrer noopener">
+              Hoffmann et al., "Training Compute-Optimal Large Language Models" (Chinchilla)
+            </a>
+          </li>
+          <li>
+            <a href="https://arxiv.org/abs/2412.19437" target="_blank" rel="noreferrer noopener">
+              DeepSeek-V3 technical report (MLA architecture)
+            </a>
+          </li>
+          <li>
+            <a href="https://docs.vllm.ai/" target="_blank" rel="noreferrer noopener">
+              vLLM documentation — flag reference
+            </a>
+          </li>
+        </ul>
+      </DocSection>
+      </div>
+    </section>
+  );
+}
+
+function DocsToc() {
+  const sections: Array<[string, string]> = [
+    ["overview", "What this app does"],
+    ["roofline", "Roofline model"],
+    ["break-even", "Break-even batch"],
+    ["step-interval", "Step interval"],
+    ["kv-cache", "KV cache"],
+    ["memory-fit", "Memory fit"],
+    ["bottleneck", "Bottleneck classifier"],
+    ["metrics", "Metric reference"],
+    ["inputs", "Input reference"],
+    ["auto-optimize", "Auto-optimize"],
+    ["vllm-command", "vLLM command"],
+    ["hf-import", "Hugging Face import"],
+    ["report", "Markdown report"],
+    ["confidence", "Confidence badges"],
+    ["glossary", "Glossary"],
+    ["sources", "Sources"],
+  ];
+  return (
+    <nav className="panel docs-toc" aria-label="Documentation contents">
+      <h3>On this page</h3>
+      <ul>
+        {sections.map(([id, label]) => (
+          <li key={id}>
+            <a href={`#${id}`}>{label}</a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
+function DocSection({
+  id,
+  title,
+  children,
+}: {
+  id: string;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <article className="panel doc-section" id={id}>
+      <h2>
+        <a href={`#${id}`} className="doc-anchor" aria-label={`Link to ${title}`}>
+          #
+        </a>{" "}
+        {title}
+      </h2>
+      {children}
+    </article>
+  );
 }
 
 function SettingsPanel({
@@ -338,9 +1114,8 @@ function SettingsPanel({
 function Field({ label, help, children }: { label: string; help: string; children: React.ReactNode }) {
   return (
     <div className="field">
-      <label>
-        {label} <Help text={help} />
-      </label>
+      <label>{label}</label>
+      <FieldHint>{help}</FieldHint>
       {children}
     </div>
   );
@@ -369,9 +1144,8 @@ function NumberField({
 
   return (
     <div className="field">
-      <label>
-        {label} <Help text={help} />
-      </label>
+      <label>{label}</label>
+      <FieldHint>{help}</FieldHint>
       <input type="number" value={boundedValue} min={min} max={safeMax} step={step} onChange={(event) => update(Number(event.target.value))} />
       <input type="range" value={boundedValue} min={min} max={safeMax} step={step} onChange={(event) => update(Number(event.target.value))} />
     </div>
@@ -385,10 +1159,10 @@ function KvBytesField({ value, onChange }: { value: number; onChange: (value: nu
 
   return (
     <div className="field">
-      <label>
-        KV bytes / token{" "}
-        <Help text="Estimated cache per context token. The slider uses a log scale because useful KV values range from tiny MLA caches to multi-MB dense caches." />
-      </label>
+      <label>KV bytes / token</label>
+      <FieldHint>
+        Estimated cache per context token. The slider uses a log scale because useful KV values range from tiny MLA caches to multi-MB dense caches.
+      </FieldHint>
       <input
         type="number"
         value={boundedValue}
@@ -410,21 +1184,252 @@ function KvBytesField({ value, onChange }: { value: number; onChange: (value: nu
   );
 }
 
-function Help({ text }: { text: string }) {
+function FieldHint({ children }: { children: React.ReactNode }) {
+  return <p className="field-hint">{children}</p>;
+}
+
+function PrecisionExplainer({
+  weightBytesPerParam,
+  hardware,
+  model,
+}: {
+  weightBytesPerParam: number;
+  hardware: HardwarePreset;
+  model: ModelPreset;
+}) {
+  const totalWeightBytes = model.totalParams * weightBytesPerParam;
+  const perGpuWeightBytes = totalWeightBytes / Math.max(1, hardware.gpuCount);
+  const nativeBytes = hardware.nativeComputeBytes;
+  const nativeLabel = nativeBytes <= 0.5 ? "FP4" : nativeBytes <= 1 ? "FP8" : "BF16";
+  const computeRatio = nativeBytes / weightBytesPerParam;
+  let advisory: string | null = null;
+  let tone: "ok" | "warn" | "info" = "ok";
+  if (Math.abs(computeRatio - 1) < 0.01) {
+    advisory = `Matches this hardware's native compute precision (${nativeLabel}) — full tensor-core throughput.`;
+    tone = "ok";
+  } else if (computeRatio < 1) {
+    const lossFactor = 1 / computeRatio;
+    advisory = `Wider than ${nativeLabel}: you're leaving roughly ${lossFactor.toFixed(0)}× tensor-core throughput on the table. Drop precision (or pick hardware whose native is BF16/FP8) for full speed.`;
+    tone = "warn";
+  } else {
+    advisory = `Narrower than ${nativeLabel} native: kernels typically dequantize on the fly. Memory savings are real, but compute speed and quality depend on the runtime's quantization path (e.g. AWQ, GPTQ, NVFP4).`;
+    tone = "info";
+  }
   return (
-    <span className="help" tabIndex={0} aria-label={text}>
-      ?
-      <span role="tooltip">{text}</span>
-    </span>
+    <div className={`precision-explainer ${tone}`}>
+      <div className="precision-explainer-stats">
+        <span>
+          <strong>{formatBytes(totalWeightBytes)}</strong> weights total
+        </span>
+        <span>
+          <strong>{formatBytes(perGpuWeightBytes)}</strong> / GPU
+          {hardware.gpuCount > 1 ? ` (× ${hardware.gpuCount})` : ""}
+        </span>
+        <span>
+          <strong>{weightBytesPerParam} B</strong> / param
+        </span>
+      </div>
+      <p>{advisory}</p>
+    </div>
+  );
+}
+
+function HuggingFaceSearch({
+  onImport,
+  onForget,
+  importedIds,
+}: {
+  onImport: (preset: ModelPreset) => void;
+  onForget: (presetId: string) => void;
+  importedIds: string[];
+}) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<HfSearchHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [busyRepoId, setBusyRepoId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [errorRepoId, setErrorRepoId] = useState<string | null>(null);
+  const [token, setToken] = useState<string>(() => loadStoredHfToken());
+  const [showTokenField, setShowTokenField] = useState<boolean>(() => loadStoredHfToken().length > 0);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    setError(null);
+    setErrorRepoId(null);
+    if (!query.trim()) {
+      setResults([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const handle = window.setTimeout(async () => {
+      try {
+        const hits = await searchModels(query, { signal: controller.signal, token: token || undefined });
+        if (!controller.signal.aborted) setResults(hits);
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setResults([]);
+        setError(err instanceof Error ? err.message : "Search failed");
+      } finally {
+        if (!controller.signal.aborted) setSearching(false);
+      }
+    }, 300);
+    return () => {
+      window.clearTimeout(handle);
+      controller.abort();
+    };
+  }, [query, token]);
+
+  function persistToken(next: string) {
+    setToken(next);
+    storeHfToken(next);
+  }
+
+  async function importRepo(repoId: string) {
+    setBusyRepoId(repoId);
+    setError(null);
+    setErrorRepoId(null);
+    try {
+      const [config, knownTotal] = await Promise.all([
+        loadModelConfig(repoId, { token: token || undefined }),
+        loadSafetensorsTotal(repoId, { token: token || undefined }).catch(() => undefined),
+      ]);
+      const preset = derivePresetFromHfConfig(repoId, config, knownTotal);
+      onImport(preset);
+      setResults([]);
+      setQuery("");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Import failed";
+      setError(message);
+      setErrorRepoId(repoId);
+      // Auto-reveal token field when access is the problem.
+      if (/gated|token/i.test(message)) setShowTokenField(true);
+    } finally {
+      setBusyRepoId(null);
+    }
+  }
+
+  return (
+    <div className="hf-search">
+      <input
+        type="search"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder="Search Hugging Face — e.g. qwen3, llama, deepseek"
+        aria-label="Search Hugging Face for a model"
+      />
+      <div className="hf-token-row">
+        <button
+          type="button"
+          className="link-button"
+          onClick={() => setShowTokenField((current) => !current)}
+        >
+          {showTokenField ? "Hide token" : token ? "Token saved · edit" : "Add HF access token"}
+        </button>
+      </div>
+      {showTokenField && (
+        <div className="hf-token-field">
+          <input
+            type="password"
+            value={token}
+            onChange={(event) => persistToken(event.target.value)}
+            placeholder="hf_…"
+            aria-label="Hugging Face access token"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <small>
+            Stored in your browser's localStorage. Generate one at{" "}
+            <a
+              href="https://huggingface.co/settings/tokens"
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              huggingface.co/settings/tokens
+            </a>
+            . You still need to accept each gated model's license on its model page.
+          </small>
+        </div>
+      )}
+      {error && (
+        <p className="hf-error">
+          {errorRepoId ? <strong>{errorRepoId}: </strong> : null}
+          {error}
+        </p>
+      )}
+      {searching && <p className="hf-status">Searching huggingface.co…</p>}
+      {results.length > 0 && (
+        <ul className="hf-results">
+          {results.map((hit) => {
+            const id = hit.id ?? hit.modelId ?? "";
+            const alreadyImported = importedIds.includes(`hf:${id}`);
+            const busy = busyRepoId === id;
+            const gated = Boolean(hit.gated) && hit.gated !== false;
+            const gatedWithoutToken = gated && !token;
+            return (
+              <li key={id}>
+                <div className="hf-result-meta">
+                  <strong>
+                    {gated && <span className="hf-tag">🔒 gated</span>}
+                    {id}
+                  </strong>
+                  <small>
+                    {typeof hit.downloads === "number" ? `${formatCompact(hit.downloads)} downloads` : ""}
+                    {typeof hit.likes === "number" ? ` · ${formatCompact(hit.likes)} likes` : ""}
+                    {gatedWithoutToken ? " · needs HF token" : ""}
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={busy}
+                  title={
+                    gatedWithoutToken
+                      ? "This is a gated model. Add an HF token below and accept the license on its model page."
+                      : undefined
+                  }
+                  onClick={() => (alreadyImported ? onForget(`hf:${id}`) : importRepo(id))}
+                >
+                  {busy ? "Loading…" : alreadyImported ? "Remove" : gatedWithoutToken ? "Import (needs token)" : "Import"}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
 function VerdictCard({ result, scenario }: { result: ReturnType<typeof calculateScenario>; scenario: ScenarioInputs }) {
+  const lightLabel =
+    result.verdict === "fits"
+      ? "go"
+      : result.verdict === "tight"
+        ? "caution"
+        : result.verdict === "does-not-fit"
+          ? "stop"
+          : "n/a";
   return (
     <article className={`verdict-card ${result.verdict}`}>
       <div>
         <p className="eyebrow">Operator verdict</p>
-        <h2>{result.verdictLabel}</h2>
+        <h2>
+          <span
+            className="verdict-light"
+            role="img"
+            aria-label={`${lightLabel}: ${result.verdictLabel}`}
+            title={lightLabel}
+          >
+            <i className="red" />
+            <i className="amber" />
+            <i className="green" />
+          </span>
+          <span>{result.verdictLabel}</span>
+        </h2>
         <p>{result.mainReason}</p>
       </div>
       <div className="next-action">
@@ -441,12 +1446,60 @@ function VerdictCard({ result, scenario }: { result: ReturnType<typeof calculate
 }
 
 function MetricGrid({ result, scenario }: { result: ReturnType<typeof calculateScenario>; scenario: ScenarioInputs }) {
+  const stepLabel = Number.isFinite(result.stepIntervalSeconds)
+    ? formatTime(result.stepIntervalSeconds)
+    : "--";
+  const tpsLabel = Number.isFinite(result.derivedTokensPerSecond)
+    ? formatCompact(result.derivedTokensPerSecond, " tok/s")
+    : "--";
+  const sparsityLabel = Number.isFinite(result.sparsityRatio) && result.sparsityRatio > 0
+    ? `${formatNumber(result.sparsityRatio, 1)}×`
+    : "--";
+  const chinchillaLabel = Number.isFinite(result.chinchillaRatio) && result.chinchillaRatio > 0
+    ? `${formatNumber(result.chinchillaRatio, 2)}×`
+    : "--";
   return (
     <section className="metric-grid">
-      <Metric title="Memory used / GPU" value={formatBytes(result.requiredBytesPerGpu)} sub={`${formatNumber(result.memoryUtilization * 100, 0)}% of safety budget`} />
-      <Metric title="Max fitting batch" value={formatCompact(result.maxFittingBatch)} sub="at selected context and KV size" />
-      <Metric title="Batch threshold" value={formatCompact(result.batchThreshold)} sub="cost-optimal weight amortization target" />
-      <Metric title="HBM drain time" value={formatTime(result.hbmDrainSeconds)} sub={`${scenario.hardware.gpuCount} GPU preset`} />
+      <Metric
+        title="Memory used / GPU"
+        value={formatBytes(result.requiredBytesPerGpu)}
+        sub={`${formatNumber(result.memoryUtilization * 100, 0)}% of the safety-adjusted HBM budget`}
+      />
+      <Metric
+        title="Max users at this context"
+        value={formatCompact(result.maxFittingBatch)}
+        sub="biggest batch the HBM budget allows"
+      />
+      <Metric
+        title="Break-even batch"
+        value={formatCompact(result.batchThreshold)}
+        sub="below this, per-token cost climbs fast"
+      />
+      <Metric
+        title="Step interval"
+        value={stepLabel}
+        sub="≈ HBM drain — the train departs this often"
+      />
+      <Metric
+        title="Pool throughput"
+        value={tpsLabel}
+        sub="tokens / second derived from batch ÷ step"
+      />
+      <Metric
+        title="Sparsity"
+        value={sparsityLabel}
+        sub="total / active params — the bigger this is, the more users you need to fill a batch"
+      />
+      <Metric
+        title="HBM drain time"
+        value={formatTime(result.hbmDrainSeconds)}
+        sub="time to read every weight in HBM once"
+      />
+      <Metric
+        title="Chinchilla coverage"
+        value={chinchillaLabel}
+        sub="lifetime served / 20·active params (1× = trained-equivalent)"
+      />
     </section>
   );
 }
@@ -466,22 +1519,35 @@ function PlanningPanel({ plan, onApply }: { plan: ServingPlan; onApply: () => vo
     void navigator.clipboard?.writeText(plan.command);
   }
 
+  const target = Math.max(1, Math.floor(plan.maxFittingBatch));
+  const noChange = !Number.isFinite(plan.maxFittingBatch) || target <= 0 || target === plan.requestedBatch;
+
   return (
-    <article className={`panel planning-panel ${plan.fitsRequestedConcurrency ? "fits" : "does-not-fit"}`}>
+    <article className={`panel planning-panel ${plan.fitsRequestedBatch ? "fits" : "does-not-fit"}`}>
       <div className="panel-heading">
         <div>
-          <h2>Planning mode</h2>
+          <h2>Suggested vLLM config</h2>
           <span>{plan.summary}</span>
         </div>
-        <button type="button" className="secondary-button" onClick={onApply}>
-          Apply planned batch
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={onApply}
+          disabled={noChange}
+          title={
+            noChange
+              ? "Batch is already at the largest size that fits"
+              : `Set batch to ${target.toLocaleString()}`
+          }
+        >
+          {noChange ? `At max (${target.toLocaleString()})` : `Use largest fitting batch (${target.toLocaleString()})`}
         </button>
       </div>
 
       <div className="planning-grid">
-        <Fact label="Requested users" value={formatCompact(plan.requestedConcurrency)} />
-        <Fact label="Planned max users" value={formatCompact(plan.plannedConcurrency)} />
-        <Fact label="Max that fits" value={formatCompact(plan.maxFittingConcurrency)} />
+        <Fact label="Selected batch" value={formatCompact(plan.requestedBatch)} />
+        <Fact label="Planned batch" value={formatCompact(plan.plannedBatch)} />
+        <Fact label="Max that fits" value={formatCompact(plan.maxFittingBatch)} />
         <Fact label="TP size" value={String(plan.recommendedTensorParallelSize)} />
       </div>
 
@@ -551,14 +1617,22 @@ function ComparisonTable({
   );
 }
 
-function MemoryChart({ result }: { result: ReturnType<typeof calculateScenario> }) {
+function MemoryChart({
+  result,
+  hardware,
+}: {
+  result: ReturnType<typeof calculateScenario>;
+  hardware: HardwarePreset;
+}) {
   const usedPct = clamp(result.requiredBytesPerGpu / result.availableBytesPerGpu, 0, 1.4) * 100;
   const remainingPct = Math.max(0, 100 - usedPct);
+  const gpuCount = hardware.gpuCount;
+  const poolMultiplier = gpuCount > 1 ? ` (× ${gpuCount} GPUs)` : "";
   return (
     <article className="panel">
       <div className="panel-heading">
         <h2>Memory fit</h2>
-        <span>{formatBytes(result.availableBytesPerGpu)} usable / GPU</span>
+        <span>{formatBytes(result.availableBytesPerGpu)} usable / GPU{poolMultiplier}</span>
       </div>
       <div className="memory-bar" aria-label="Memory utilization">
         <i style={{ width: `${Math.min(usedPct, 100)}%` }} />
@@ -568,52 +1642,202 @@ function MemoryChart({ result }: { result: ReturnType<typeof calculateScenario> 
         <span><i className="used" /> Required {formatBytes(result.requiredBytesPerGpu)}</span>
         <span><i className="free" /> Remaining {formatBytes(result.memoryRemainingBytesPerGpu)}</span>
       </div>
+      {gpuCount > 1 && (
+        <div className="memory-pool-row">
+          <table className="memory-pool-table">
+            <thead>
+              <tr>
+                <th></th>
+                <th>Per GPU</th>
+                <th>Pool (× {gpuCount})</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Weights</td>
+                <td>{formatBytes(result.weightBytesTotal / gpuCount)}</td>
+                <td>{formatBytes(result.weightBytesTotal)}</td>
+              </tr>
+              <tr>
+                <td>KV cache</td>
+                <td>{formatBytes(result.kvBytesTotal / gpuCount)}</td>
+                <td>{formatBytes(result.kvBytesTotal)}</td>
+              </tr>
+              <tr>
+                <td>Required</td>
+                <td>{formatBytes(result.requiredBytesPerGpu)}</td>
+                <td>{formatBytes(result.requiredBytesPerGpu * gpuCount)}</td>
+              </tr>
+              <tr>
+                <td>Available (safety-adj)</td>
+                <td>{formatBytes(result.availableBytesPerGpu)}</td>
+                <td>{formatBytes(result.availableBytesPerGpu * gpuCount)}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p className="chart-caption">
+            The model is sharded across all {gpuCount} GPUs — each one holds {formatBytes(result.weightBytesTotal / gpuCount)} of weights and {formatBytes(result.kvBytesTotal / gpuCount)} of KV. Fit is decided per GPU because each card is its own HBM domain.
+          </p>
+        </div>
+      )}
     </article>
   );
 }
 
-function LatencyChart({ scenario }: { scenario: ScenarioInputs }) {
-  const points = Array.from({ length: 32 }, (_, index) => {
-    const batch = 1 + (index / 31) * Math.max(scenario.batchSize * 1.5, 100);
-    const memorySeconds =
-      (scenario.model.totalParams * scenario.weightBytesPerParam + batch * scenario.contextTokens * scenario.kvBytesPerToken) /
-      (scenario.hardware.memoryBandwidthBytesPerSecondPerGpu * scenario.hardware.gpuCount);
-    const computeSeconds =
-      (batch * scenario.model.activeParams) /
-      (scenario.flopsPerByte * scenario.hardware.memoryBandwidthBytesPerSecondPerGpu * scenario.hardware.gpuCount);
-    return { batch, memorySeconds, computeSeconds, totalSeconds: Math.max(memorySeconds, computeSeconds) };
-  });
+// Plot rectangle in SVG units. Both charts share the same axes layout.
+const PLOT = { left: 56, right: 510, top: 36, bottom: 200, width: 454, height: 164 };
+const TICK_FRACTIONS = [0, 0.25, 0.5, 0.75, 1];
+
+function AxisGrid({
+  maxX,
+  maxY,
+  xFormat,
+  yFormat,
+  yUnit,
+}: {
+  maxX: number;
+  maxY: number;
+  xFormat: (v: number) => string;
+  yFormat: (v: number) => string;
+  yUnit?: string;
+}) {
+  return (
+    <g>
+      {TICK_FRACTIONS.map((f) => {
+        const y = PLOT.bottom - f * PLOT.height;
+        return (
+          <g key={`y-${f}`}>
+            <line x1={PLOT.left} y1={y} x2={PLOT.right} y2={y} className="grid-line" />
+            <text x={PLOT.left - 6} y={y + 3} className="axis-tick" textAnchor="end">
+              {yFormat(f * maxY)}
+            </text>
+          </g>
+        );
+      })}
+      {TICK_FRACTIONS.map((f) => {
+        const x = PLOT.left + f * PLOT.width;
+        return (
+          <g key={`x-${f}`}>
+            <line x1={x} y1={PLOT.top} x2={x} y2={PLOT.bottom} className="grid-line" />
+            <text x={x} y={PLOT.bottom + 14} className="axis-tick" textAnchor="middle">
+              {xFormat(f * maxX)}
+            </text>
+          </g>
+        );
+      })}
+      {/* solid axes on top of the grid */}
+      <line x1={PLOT.left} y1={PLOT.top} x2={PLOT.left} y2={PLOT.bottom} className="axis-line" />
+      <line x1={PLOT.left} y1={PLOT.bottom} x2={PLOT.right} y2={PLOT.bottom} className="axis-line" />
+      <text x={PLOT.right} y={PLOT.bottom + 28} className="axis-label" textAnchor="end">
+        batch
+      </text>
+      {yUnit && (
+        <text x={PLOT.left - 6} y={PLOT.top - 10} className="axis-label" textAnchor="end">
+          {yUnit}
+        </text>
+      )}
+    </g>
+  );
+}
+
+function LatencyChart({ scenario, batchThreshold }: { scenario: ScenarioInputs; batchThreshold: number }) {
+  const points = getRooflineSweep(scenario);
   const maxX = Math.max(...points.map((p) => p.batch));
   const maxY = Math.max(...points.map((p) => p.totalSeconds), 1e-9);
-  const path = (key: "memorySeconds" | "computeSeconds" | "totalSeconds") =>
+  const weightFloor = points[0]?.weightFetchSeconds ?? 0;
+  const path = (key: "computeSeconds" | "kvFetchSeconds" | "totalSeconds") =>
     points
       .map((point, index) => {
-        const x = 48 + (point.batch / maxX) * 452;
-        const y = 190 - (point[key] / maxY) * 150;
+        const x = PLOT.left + (point.batch / maxX) * PLOT.width;
+        const y = PLOT.bottom - (point[key] / maxY) * PLOT.height;
         return `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
       })
       .join(" ");
+  const weightFloorY = PLOT.bottom - (weightFloor / maxY) * PLOT.height;
+  const knee =
+    Number.isFinite(batchThreshold) && batchThreshold > 0 && batchThreshold < maxX
+      ? PLOT.left + (batchThreshold / maxX) * PLOT.width
+      : null;
 
   return (
     <article className="panel">
       <div className="panel-heading">
-        <h2>Latency shape</h2>
-        <span>y-axis: {formatTime(maxY)}</span>
+        <h2>Latency vs batch</h2>
+        <span>One decode step as batch grows. Total = max(compute, weight-fetch + KV-fetch)</span>
       </div>
-      <svg viewBox="0 0 540 230" className="latency-svg" role="img" aria-label="Latency shape chart">
-        <line x1="48" y1="40" x2="48" y2="190" />
-        <line x1="48" y1="190" x2="500" y2="190" />
-        <text x="12" y="48">{formatTime(maxY)}</text>
-        <text x="450" y="216">batch</text>
+      <svg viewBox="0 0 560 240" className="latency-svg" role="img" aria-label="Latency vs batch chart">
+        <AxisGrid maxX={maxX} maxY={maxY} xFormat={(v) => formatCompact(v)} yFormat={(v) => formatTime(v)} yUnit="step time" />
+        {knee !== null && (
+          <g>
+            <line x1={knee} y1={PLOT.top} x2={knee} y2={PLOT.bottom} className="knee-line" />
+            <text x={knee + 4} y={PLOT.top + 10} className="knee-label">
+              break-even ≈ {formatCompact(batchThreshold)}
+            </text>
+          </g>
+        )}
+        {/* weight fetch is constant in batch — horizontal floor */}
+        <line x1={PLOT.left} y1={weightFloorY} x2={PLOT.right} y2={weightFloorY} className="weight-line" />
+        <text x={PLOT.left + 4} y={weightFloorY - 4} className="floor-label">
+          weight fetch ≈ {formatTime(weightFloor)}
+        </text>
+        <path d={path("kvFetchSeconds")} className="memory-line" />
         <path d={path("computeSeconds")} className="compute-line" />
-        <path d={path("memorySeconds")} className="memory-line" />
         <path d={path("totalSeconds")} className="total-line" />
       </svg>
       <div className="memory-legend">
-        <span><i className="compute" /> compute</span>
-        <span><i className="memory" /> memory</span>
-        <span><i className="total" /> total</span>
+        <span><i className="compute" /> t_compute</span>
+        <span><i className="memory" /> KV fetch</span>
+        <span><i className="weight" /> weight fetch</span>
+        <span><i className="total" /> step time</span>
       </div>
+      <p className="chart-caption">
+        The weight-fetch line is flat — you load the full model regardless of batch — so it sets a floor on step time. KV fetch and compute both scale with batch; whichever is larger drives total step time.
+      </p>
+    </article>
+  );
+}
+
+function CostChart({ scenario, batchThreshold }: { scenario: ScenarioInputs; batchThreshold: number }) {
+  const points = getRooflineSweep(scenario);
+  const maxX = Math.max(...points.map((p) => p.batch));
+  const trimmed = points.filter((p) => Number.isFinite(p.costPerToken));
+  // clamp the y range to the third sample onward — batch=1 explodes the hyperbola.
+  const maxY = Math.max(...trimmed.slice(2).map((p) => p.costPerToken), 1e-9);
+  const path = trimmed
+    .map((point, index) => {
+      const x = PLOT.left + (point.batch / maxX) * PLOT.width;
+      const yRaw = Math.min(point.costPerToken, maxY);
+      const y = PLOT.bottom - (yRaw / maxY) * PLOT.height;
+      return `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const knee =
+    Number.isFinite(batchThreshold) && batchThreshold > 0 && batchThreshold < maxX
+      ? PLOT.left + (batchThreshold / maxX) * PLOT.width
+      : null;
+  const yFormat = (v: number) => `${formatTime(v)}/tok`;
+
+  return (
+    <article className="panel">
+      <div className="panel-heading">
+        <h2>Cost per token vs batch</h2>
+        <span>Lower is cheaper. Flat tail = compute-bound</span>
+      </div>
+      <svg viewBox="0 0 560 240" className="latency-svg" role="img" aria-label="Cost per token vs batch chart">
+        <AxisGrid maxX={maxX} maxY={maxY} xFormat={(v) => formatCompact(v)} yFormat={yFormat} yUnit="cost / tok" />
+        {knee !== null && (
+          <g>
+            <line x1={knee} y1={PLOT.top} x2={knee} y2={PLOT.bottom} className="knee-line" />
+            <text x={knee + 4} y={PLOT.top + 10} className="knee-label">
+              amortization knee ≈ {formatCompact(batchThreshold)}
+            </text>
+          </g>
+        )}
+        <path d={path} className="total-line" />
+      </svg>
+      <p className="chart-caption">
+        At small batches each user pays a full weight-fetch. The hyperbola flattens past the break-even batch — that flat line is the floor on per-token cost for this hardware.
+      </p>
     </article>
   );
 }
@@ -622,18 +1846,27 @@ function Assumptions({
   hardware,
   model,
   result,
-  onExport,
+  onCopyReport,
+  onDownloadReport,
 }: {
   hardware: HardwarePreset;
   model: ModelPreset;
   result: ReturnType<typeof calculateScenario>;
-  onExport: () => void;
+  onCopyReport: () => void;
+  onDownloadReport: () => void;
 }) {
   return (
     <article className="panel assumptions">
       <div className="panel-heading">
         <h2>Assumptions and warnings</h2>
-        <button type="button" className="secondary-button" onClick={onExport}>Copy scenario Markdown</button>
+        <div className="report-actions">
+          <button type="button" className="secondary-button" onClick={onCopyReport}>
+            Copy report
+          </button>
+          <button type="button" className="primary-button" onClick={onDownloadReport}>
+            ⬇ Download report
+          </button>
+        </div>
       </div>
       <div className="badge-row">
         <Badge tone={hardware.confidence}>Hardware: {hardware.confidence}</Badge>
