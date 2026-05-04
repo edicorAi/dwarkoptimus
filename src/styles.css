@@ -39,21 +39,67 @@ select {
   padding: 30px 0 44px;
 }
 
-.top-nav {
+.top-nav-row {
   position: sticky;
   top: 0;
   z-index: 20;
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.top-nav {
+  display: flex;
   gap: 6px;
   width: fit-content;
   max-width: 100%;
-  margin-bottom: 20px;
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 12px 34px rgba(20, 32, 27, 0.09);
   backdrop-filter: blur(14px);
+}
+
+.github-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 12px 34px rgba(20, 32, 27, 0.09);
+  backdrop-filter: blur(14px);
+  color: var(--ink);
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-decoration: none;
+  transition: background 120ms ease, transform 80ms ease;
+}
+
+.github-link:hover {
+  background: rgba(31, 122, 85, 0.08);
+  color: var(--green);
+}
+
+.github-link:active {
+  transform: translateY(1px);
+}
+
+.github-link svg {
+  display: block;
+}
+
+@media (max-width: 540px) {
+  .github-link span {
+    display: none;
+  }
+  .github-link {
+    padding: 8px 10px;
+  }
 }
 
 .top-nav button {
