@@ -1,5 +1,7 @@
 # LLM Systems Calculator
 
+**Live app: <https://edicorai.github.io/dwarkoptimus/>**
+
 React 19 + TypeScript + Vite app for estimating whether a selected LLM fits on the user's NVIDIA hardware (B300, H200, etc.). Produces a fit verdict, bottleneck explanation, and a suggested `vllm serve` command.
 
 ## What it does
