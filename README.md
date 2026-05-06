@@ -4,6 +4,24 @@
 
 React 19 + TypeScript + Vite app for estimating whether a selected LLM fits on the user's NVIDIA hardware (B300, H200, etc.). Produces a fit verdict, bottleneck explanation, and a suggested `vllm serve` command.
 
+## Screenshots
+
+**Planner — fit verdict and suggested vLLM config**
+
+![Planner: traffic-light verdict and suggested vllm serve command](docs/screenshots/planner.png)
+
+**Planner — roofline metrics, memory fit, latency vs batch**
+
+![Planner: metric tiles, memory fit panel, latency-vs-batch chart](docs/screenshots/metrics.png)
+
+**Docs — single-scroll reference for every metric and knob**
+
+![Docs tab: in-app documentation with sticky table of contents](docs/screenshots/docs.png)
+
+**Settings — pick the hardware you actually have**
+
+![Settings tab: hardware inventory with enable/disable toggles](docs/screenshots/settings.png)
+
 ## What it does
 
 Pick a model and a hardware preset. The app translates roofline math into plain operational guidance:
