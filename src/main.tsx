@@ -292,10 +292,17 @@ function App() {
                 ))}
               </select>
             </Field>
-            <Field label="Model" help="Curated presets cover the popular open-weights models. Use the Hugging Face search below to import any other model — KV cache size and context length are read directly from its config.json.">
+            <Field label="Model" help="Curated presets cover popular open-weights models. Frontier estimates are public guesses for closed-source models (GPT-5, Claude, Gemini, Grok) — useful as scale references, but you can't actually deploy them. Use the Hugging Face search to import any other model — KV cache size and context length are read directly from its config.json.">
               <select value={modelId} onChange={(event) => applyModel(event.target.value)}>
-                <optgroup label="Curated presets">
-                  {modelPresets.map((item) => (
+                <optgroup label="Open-weights presets">
+                  {modelPresets.filter((item) => !item.id.startsWith("frontier-")).map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Frontier estimates (closed-source, not deployable)">
+                  {modelPresets.filter((item) => item.id.startsWith("frontier-")).map((item) => (
                     <option key={item.id} value={item.id}>
                       {item.label}
                     </option>
