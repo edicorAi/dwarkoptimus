@@ -74,6 +74,12 @@ function App() {
   const [pipelineStages, setPipelineStages] = useState(1);
   const [expertParallelism, setExpertParallelism] = useState(8);
   const [safetyMargin, setSafetyMargin] = useState(0.8);
+  // Lifecycle (optional). All zero by default → the lifecycle panel stays
+  // hidden until the operator opts in by entering pretrain or RL tokens.
+  const [pretrainTokens, setPretrainTokens] = useState(0);
+  const [rlTokens, setRlTokens] = useState(0);
+  const [rlInefficiency, setRlInefficiency] = useState(3);
+  const [inferenceInefficiency, setInferenceInefficiency] = useState(5);
 
   const visibleHardwarePresets = hardwarePresets.filter((item) => enabledHardwareIds.includes(item.id));
   const plannerHardwarePresets = visibleHardwarePresets.length > 0 ? visibleHardwarePresets : hardwarePresets;
@@ -93,6 +99,10 @@ function App() {
         pipelineStages,
         expertParallelism,
         safetyMargin,
+        pretrainTokens,
+        rlTokens,
+        rlInefficiency,
+        inferenceInefficiency,
       }),
     [
       hardware,
@@ -106,6 +116,10 @@ function App() {
       pipelineStages,
       expertParallelism,
       safetyMargin,
+      pretrainTokens,
+      rlTokens,
+      rlInefficiency,
+      inferenceInefficiency,
     ],
   );
   const result = useMemo(() => calculateScenario(scenario), [scenario]);
@@ -122,6 +136,10 @@ function App() {
           pipelineStages,
           expertParallelism: Math.min(expertParallelism, item.gpuCount),
           safetyMargin,
+          pretrainTokens,
+          rlTokens,
+          rlInefficiency,
+          inferenceInefficiency,
         });
         return { hardware: item, scenario: compared, result: calculateScenario(compared) };
       }),
@@ -137,6 +155,10 @@ function App() {
       pipelineStages,
       expertParallelism,
       safetyMargin,
+      pretrainTokens,
+      rlTokens,
+      rlInefficiency,
+      inferenceInefficiency,
     ],
   );
   const servingPlan = useMemo(() => createServingPlan(scenario, result), [scenario, result]);
@@ -437,6 +459,44 @@ function App() {
               onChange={setTokensPerSecond}
               help="Leave at 0 to use the derived pool throughput (batch ÷ step). Override only if you have a measured rate."
             />
+
+            <SectionTitle title="Lifecycle FLOPs (optional)" />
+            <NumberField
+              label="Pretrain tokens"
+              value={pretrainTokens}
+              min={0}
+              max={1e15}
+              step={1e11}
+              onChange={setPretrainTokens}
+              help="Tokens consumed during pretraining. Leave at 0 to hide the lifecycle panel. Pretrain FLOPs ≈ 6 × active_params × tokens."
+            />
+            <NumberField
+              label="RL tokens"
+              value={rlTokens}
+              min={0}
+              max={1e15}
+              step={1e10}
+              onChange={setRlTokens}
+              help="Tokens consumed during RL post-training (rejection sampling + PPO/GRPO + reward model passes). RL FLOPs ≈ 2 × active_params × tokens × inefficiency."
+            />
+            <NumberField
+              label="RL inefficiency"
+              value={rlInefficiency}
+              min={1}
+              max={10}
+              step={0.5}
+              onChange={setRlInefficiency}
+              help="Multiplier on the 2N forward baseline. ≈3 matches the 6N pretrain coefficient (forward + backward + RL overhead)."
+            />
+            <NumberField
+              label="Decode inefficiency"
+              value={inferenceInefficiency}
+              min={1}
+              max={20}
+              step={0.5}
+              onChange={setInferenceInefficiency}
+              help="Multiplier capturing 'decode MFU is 1/N of prefill'. Default 5 matches the lecture's rule of thumb. Affects inference FLOPs in the lifecycle panel only."
+            />
           </aside>
 
           <section className="content">
@@ -449,6 +509,7 @@ function App() {
               }}
             />
             <MetricGrid result={result} scenario={scenario} />
+            <LifecyclePanel result={result} />
             <div className="chart-grid">
               <MemoryChart result={result} hardware={hardware} />
               <LatencyChart scenario={scenario} batchThreshold={result.batchThreshold} />
@@ -1527,7 +1588,97 @@ function MetricGrid({ result, scenario }: { result: ReturnType<typeof calculateS
         value={chinchillaLabel}
         sub="lifetime served / 20·active params (1× = trained-equivalent)"
       />
+      <Metric
+        title="Prefill throughput"
+        value={
+          Number.isFinite(result.prefillTokensPerSecond)
+            ? formatCompact(result.prefillTokensPerSecond, " tok/s")
+            : "--"
+        }
+        sub="compute-bound asymptote — what prefill achieves at full FLOPs"
+      />
+      <Metric
+        title="Decode MFU"
+        value={
+          Number.isFinite(result.decodeMfu)
+            ? `${formatNumber(result.decodeMfu * 100, 1)}%`
+            : "--"
+        }
+        sub="fraction of step time actually doing FLOPs (rest is HBM waiting)"
+      />
+      <Metric
+        title="Crossover context"
+        value={
+          Number.isFinite(result.crossoverContextTokens)
+            ? `${formatCompact(result.crossoverContextTokens)} tok`
+            : "--"
+        }
+        sub="below: compute-bound. above: KV-bandwidth-bound"
+      />
+      {scenario.pipelineStages > 1 && (
+        <Metric
+          title="Pipeline efficiency"
+          value={`${formatNumber(result.pipelineEfficiency * 100, 0)}%`}
+          sub={`bubble ${formatNumber(result.pipelineBubbleFraction * 100, 0)}% — raise batch or drop PP to recover`}
+        />
+      )}
     </section>
+  );
+}
+
+function LifecyclePanel({ result }: { result: ReturnType<typeof calculateScenario> }) {
+  const lc = result.lifecycle;
+  if (lc.totalFlops <= 0) return null;
+  const phaseLabel: Record<typeof lc.dominantPhase, string> = {
+    pretrain: "Pretrain",
+    rl: "RL",
+    inference: "Inference",
+    none: "—",
+  };
+  const dominanceLabel = Number.isFinite(lc.dominanceRatio)
+    ? `${formatNumber(lc.dominanceRatio, 2)}× the runner-up`
+    : "no runner-up to compare";
+  const bar = (share: number, label: string, sub: string, tone: string) => (
+    <div className={`lifecycle-row ${tone}`}>
+      <div className="lifecycle-row-head">
+        <strong>{label}</strong>
+        <span>{formatNumber(share * 100, 1)}%</span>
+      </div>
+      <div className="lifecycle-bar">
+        <i style={{ width: `${Math.min(100, share * 100)}%` }} />
+      </div>
+      <small>{sub}</small>
+    </div>
+  );
+  return (
+    <article className="panel lifecycle-panel">
+      <div className="panel-heading">
+        <h2>Lifecycle FLOPs</h2>
+        <span>
+          Dominant: <strong>{phaseLabel[lc.dominantPhase]}</strong> ({dominanceLabel})
+        </span>
+      </div>
+      <p className="lifecycle-note">
+        Reiner's three-phase accounting. The compute-optimal equilibrium is roughly{" "}
+        <code>D_pretrain ≈ 1.5·D_RL ≈ D_inference</code> in token-equivalents. A single phase
+        running away means the deployment is over- or under-invested in that phase.
+      </p>
+      <div className="lifecycle-bars">
+        {bar(
+          lc.pretrainShare,
+          "Pretrain",
+          `${formatCompact(lc.pretrainFlops)} FLOPs (6·N·D)`,
+          "pretrain",
+        )}
+        {bar(lc.rlShare, "RL", `${formatCompact(lc.rlFlops)} FLOPs (2·N·D × ineff.)`, "rl")}
+        {bar(
+          lc.inferenceShare,
+          "Inference",
+          `${formatCompact(lc.inferenceFlops)} FLOPs (2·N·D × ineff., decode-MFU penalty)`,
+          "inference",
+        )}
+      </div>
+    </article>
   );
 }
 

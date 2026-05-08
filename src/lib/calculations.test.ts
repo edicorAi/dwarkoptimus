@@ -5,9 +5,12 @@ import {
   calculateScenario,
   createServingPlan,
   getBatchThreshold,
+  getCrossoverContextTokens,
   getHbmDrainTime,
+  getLifecycleFlops,
   getMaxFittingBatch,
   getMoeMultiRackRatio,
+  getPipelineBubble,
   getRooflineSweep,
 } from "./calculations";
 import { hardwarePresets } from "../data/hardware";
@@ -264,6 +267,145 @@ describe("autoOptimize", () => {
     });
     expect(out.overrides.batchSize).toBe(64);
     expect(out.rationale.some((r) => r.toLowerCase().includes("optimal"))).toBe(true);
+  });
+});
+
+describe("prefill vs decode regime (Section 6 flashcards)", () => {
+  it("computes prefill TPS as compute-bound asymptote (peak FLOPs / 2N_active)", () => {
+    // B300: flopsPerByte 1875 × bw 8 TB/s × 8 GPUs = 1.125e17 FLOPs/s pool peak.
+    // Qwen active params 3e9. Prefill TPS ≈ 1.125e17 / (2 × 3e9) ≈ 1.875e7 tok/s.
+    const scenario = buildScenario(b300, qwen, { batchSize: 64 });
+    const result = calculateScenario(scenario);
+    expect(result.prefillTokensPerSecond).toBeGreaterThan(1.5e7);
+    expect(result.prefillTokensPerSecond).toBeLessThan(2.2e7);
+    // Prefill is orders of magnitude above decode pool throughput.
+    expect(result.prefillTokensPerSecond).toBeGreaterThan(result.derivedTokensPerSecond * 100);
+  });
+
+  it("decodeMfu collapses below 1 when memory time exceeds compute time", () => {
+    const scenario = buildScenario(b300, qwen, { batchSize: 16, contextTokens: 4096 });
+    const result = calculateScenario(scenario);
+    expect(result.decodeMfu).toBeGreaterThan(0);
+    expect(result.decodeMfu).toBeLessThan(0.2);
+  });
+
+  it("crossover context follows the lecture's bytes/token = (1/300)(N/ctx) form", () => {
+    // ctx_crossover = N_active / (flopsPerByte × kvBytes/token)
+    // qwen active=3e9, kvBytes=24576; on B300 flopsPerByte=1875.
+    // Expect ≈ 3e9 / (1875 × 24576) ≈ 65.1
+    expect(
+      getCrossoverContextTokens({
+        flopsPerByte: 1875,
+        activeParams: 3e9,
+        kvBytesPerToken: 24576,
+      }),
+    ).toBeCloseTo(3e9 / (1875 * 24576), 1);
+  });
+
+  it("returns NaN crossover when KV bytes/token is zero (e.g., embedding workloads)", () => {
+    const scenario = buildScenario(b300, granite);
+    const result = calculateScenario(scenario);
+    expect(Number.isNaN(result.crossoverContextTokens)).toBe(true);
+    expect(Number.isNaN(result.prefillTokensPerSecond)).toBe(true);
+  });
+});
+
+describe("pipeline bubble (Section 3 flashcards)", () => {
+  it("returns zero bubble at PP=1 (no behavior change)", () => {
+    const out = getPipelineBubble({ pipelineStages: 1, batchSize: 128 });
+    expect(out.fraction).toBe(0);
+    expect(out.efficiency).toBe(1);
+  });
+
+  it("matches the (P-1)/(M+P-1) closed form for PP=4, batch=12", () => {
+    // bubble = (4-1)/(12+4-1) = 3/15 = 0.2
+    const out = getPipelineBubble({ pipelineStages: 4, batchSize: 12 });
+    expect(out.fraction).toBeCloseTo(0.2, 5);
+    expect(out.efficiency).toBeCloseTo(0.8, 5);
+  });
+
+  it("derivedTokensPerSecond at PP=1 stays at the unbubbled value (regression check)", () => {
+    const scenario = buildScenario(b300, qwen, { batchSize: 64 });
+    const result = calculateScenario(scenario);
+    expect(result.pipelineEfficiency).toBe(1);
+    // Same envelope as the existing 'derives a tokens-per-second estimate' test.
+    expect(result.derivedTokensPerSecond).toBeGreaterThan(1500);
+    expect(result.derivedTokensPerSecond).toBeLessThan(2000);
+  });
+
+  it("applies the bubble to derivedTokensPerSecond at PP > 1 with small batch", () => {
+    const scenario = buildScenario(b300, qwen, { batchSize: 8, pipelineStages: 8 });
+    const result = calculateScenario(scenario);
+    // bubble = 7/15 ≈ 0.467 — efficiency ≈ 0.533. Throughput should drop by that factor.
+    expect(result.pipelineBubbleFraction).toBeCloseTo(7 / 15, 3);
+    expect(result.pipelineEfficiency).toBeCloseTo(8 / 15, 3);
+    // Warning should fire (>20% bubble).
+    expect(result.warnings.some((w) => /pipeline bubble/i.test(w))).toBe(true);
+  });
+
+  it("does not fire the bubble warning when batch is large vs P", () => {
+    const scenario = buildScenario(b300, qwen, { batchSize: 256, pipelineStages: 2 });
+    const result = calculateScenario(scenario);
+    expect(result.pipelineBubbleFraction).toBeLessThan(0.05);
+    expect(result.warnings.some((w) => /pipeline bubble/i.test(w))).toBe(false);
+  });
+});
+
+describe("lifecycle FLOPs (Section 5 flashcards)", () => {
+  it("computes 6N pretrain, scaled RL, and scaled inference", () => {
+    const out = getLifecycleFlops({
+      activeParams: 1e10,
+      pretrainTokens: 1e13,
+      rlTokens: 1e12,
+      inferenceTokens: 1e12,
+      rlInefficiency: 3,
+      inferenceInefficiency: 5,
+    });
+    // pretrain = 6 × 1e10 × 1e13 = 6e23
+    expect(out.pretrainFlops).toBeCloseTo(6e23, -20);
+    // rl = 2 × 1e10 × 1e12 × 3 = 6e22
+    expect(out.rlFlops).toBeCloseTo(6e22, -19);
+    // inference = 2 × 1e10 × 1e12 × 5 = 1e23
+    expect(out.inferenceFlops).toBeCloseTo(1e23, -20);
+    expect(out.dominantPhase).toBe("pretrain");
+  });
+
+  it("returns an empty/zero shape when no lifecycle inputs are set", () => {
+    const out = getLifecycleFlops({
+      activeParams: 1e10,
+      pretrainTokens: 0,
+      rlTokens: 0,
+      inferenceTokens: 0,
+      rlInefficiency: 3,
+      inferenceInefficiency: 5,
+    });
+    expect(out.totalFlops).toBe(0);
+    expect(out.dominantPhase).toBe("none");
+  });
+
+  it("dominanceRatio reports the gap to the second-largest phase", () => {
+    const out = getLifecycleFlops({
+      activeParams: 1e10,
+      pretrainTokens: 1e14, // huge pretrain
+      rlTokens: 1e10,
+      inferenceTokens: 1e10,
+      rlInefficiency: 3,
+      inferenceInefficiency: 5,
+    });
+    // pretrain dominates by orders of magnitude
+    expect(out.dominantPhase).toBe("pretrain");
+    expect(out.dominanceRatio).toBeGreaterThan(100);
+  });
+
+  it("surfaces lifecycle on the full scenario result when inputs are provided", () => {
+    const base = buildScenario(b300, qwen, { batchSize: 64 });
+    const scenario = { ...base, pretrainTokens: 1e13, rlTokens: 1e12 };
+    const result = calculateScenario(scenario);
+    expect(result.lifecycle.pretrainFlops).toBeGreaterThan(0);
+    expect(result.lifecycle.rlFlops).toBeGreaterThan(0);
+    // inference flops use the derived TPS × deployment days × seconds
+    // (when manual TPS override is 0). Should be > 0 since qwen is a decoder.
+    expect(result.lifecycle.inferenceFlops).toBeGreaterThanOrEqual(0);
   });
 });
 

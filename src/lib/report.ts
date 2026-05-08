@@ -142,7 +142,42 @@ export function buildScenarioReport(input: ReportInput): string {
   lines.push(
     `| Chinchilla coverage | ${Number.isFinite(result.chinchillaRatio) ? `${formatNumber(result.chinchillaRatio, 2)}×` : "—"} |`,
   );
+  lines.push(
+    `| Prefill throughput (compute-bound) | ${num(result.prefillTokensPerSecond, " tok/s")} |`,
+  );
+  lines.push(
+    `| Decode MFU (this batch) | ${Number.isFinite(result.decodeMfu) ? `${formatNumber(result.decodeMfu * 100, 1)}%` : "—"} |`,
+  );
+  lines.push(
+    `| Crossover context (compute → memory bound) | ${Number.isFinite(result.crossoverContextTokens) ? `${formatCompact(result.crossoverContextTokens)} tok` : "—"} |`,
+  );
+  if (scenario.pipelineStages > 1) {
+    lines.push(
+      `| Pipeline efficiency | ${formatNumber(result.pipelineEfficiency * 100, 1)}% (bubble ${formatNumber(result.pipelineBubbleFraction * 100, 1)}%) |`,
+    );
+  }
   lines.push("");
+
+  if (result.lifecycle.totalFlops > 0) {
+    lines.push("## Lifecycle FLOPs");
+    lines.push("");
+    lines.push("| Phase | FLOPs | Share |");
+    lines.push("|---|---|---|");
+    lines.push(
+      `| Pretrain (6N·D) | ${formatCompact(result.lifecycle.pretrainFlops)} | ${formatNumber(result.lifecycle.pretrainShare * 100, 1)}% |`,
+    );
+    lines.push(
+      `| RL (2N·D × ineff.) | ${formatCompact(result.lifecycle.rlFlops)} | ${formatNumber(result.lifecycle.rlShare * 100, 1)}% |`,
+    );
+    lines.push(
+      `| Inference (2N·D × ineff.) | ${formatCompact(result.lifecycle.inferenceFlops)} | ${formatNumber(result.lifecycle.inferenceShare * 100, 1)}% |`,
+    );
+    lines.push("");
+    lines.push(
+      `Dominant phase: **${result.lifecycle.dominantPhase}** (${Number.isFinite(result.lifecycle.dominanceRatio) ? `${formatNumber(result.lifecycle.dominanceRatio, 2)}×` : "—"} the runner-up). Reiner's equilibrium is roughly D_pretrain ≈ 1.5 · D_RL ≈ D_inference.`,
+    );
+    lines.push("");
+  }
 
   lines.push("## Suggested vLLM serve command");
   lines.push("");

@@ -1,4 +1,4 @@
-import type { HardwarePreset, ModelPreset, ScenarioInputs, ScenarioResult, ServingPlan, Verdict } from "../types";
+import type { HardwarePreset, LifecycleFlops, ModelPreset, ScenarioInputs, ScenarioResult, ServingPlan, Verdict } from "../types";
 
 const decoderArchitectures = new Set(["dense", "moe", "hybrid"]);
 
@@ -28,6 +28,10 @@ export function buildScenario(
     pipelineStages: overrides.pipelineStages ?? 1,
     expertParallelism: overrides.expertParallelism ?? hardware.gpuCount,
     safetyMargin: overrides.safetyMargin ?? 0.8,
+    pretrainTokens: overrides.pretrainTokens ?? 0,
+    rlTokens: overrides.rlTokens ?? 0,
+    rlInefficiency: overrides.rlInefficiency ?? 3,
+    inferenceInefficiency: overrides.inferenceInefficiency ?? 5,
   };
 }
 
@@ -80,9 +84,35 @@ export function calculateScenario(input: ScenarioInputs): ScenarioResult {
   // sit idle. Pool throughput = batch / step, so the user sees a derived
   // tokens/sec rather than having to guess.
   const stepIntervalSeconds = isDecoder ? hbmDrainSeconds : Number.NaN;
-  const derivedTokensPerSecond =
+  const pipelineBubble = getPipelineBubble({
+    pipelineStages: input.pipelineStages,
+    batchSize: input.batchSize,
+  });
+  const idealDecodeTokensPerSecond =
     isDecoder && stepIntervalSeconds > 0 ? input.batchSize / stepIntervalSeconds : Number.NaN;
+  const derivedTokensPerSecond = Number.isFinite(idealDecodeTokensPerSecond)
+    ? idealDecodeTokensPerSecond * pipelineBubble.efficiency
+    : Number.NaN;
   const sparsityRatio = safeDivide(input.model.totalParams, input.model.activeParams);
+  const peakFlopsPool =
+    input.flopsPerByte * input.hardware.memoryBandwidthBytesPerSecondPerGpu * input.hardware.gpuCount;
+  const prefillTokensPerSecond = isDecoder
+    ? safeDivide(peakFlopsPool, 2 * input.model.activeParams)
+    : Number.NaN;
+  const computeSecondsAtBatch = isDecoder
+    ? safeDivide(2 * input.batchSize * input.model.activeParams, peakFlopsPool)
+    : Number.NaN;
+  const decodeMfu =
+    isDecoder && stepIntervalSeconds > 0 && Number.isFinite(computeSecondsAtBatch)
+      ? Math.min(1, computeSecondsAtBatch / stepIntervalSeconds)
+      : Number.NaN;
+  const crossoverContextTokens = isDecoder
+    ? getCrossoverContextTokens({
+        flopsPerByte: input.flopsPerByte,
+        activeParams: input.model.activeParams,
+        kvBytesPerToken: input.kvBytesPerToken,
+      })
+    : Number.NaN;
   // If the user left the manual tps override at the default, prefer the derived value
   // for the lifetime-tokens estimate so the Chinchilla figure is realistic.
   const tpsForLifetime =
@@ -97,10 +127,31 @@ export function calculateScenario(input: ScenarioInputs): ScenarioResult {
     inferenceTokens,
     activeParams: input.model.activeParams,
   });
+  // Lifecycle accounting is opt-in: it only becomes meaningful once the
+  // operator supplies pretrain or RL token counts. Until then, returning
+  // inference-only FLOPs would just rephrase the Chinchilla tile.
+  const lifecycleEnabled = input.pretrainTokens > 0 || input.rlTokens > 0;
+  const lifecycle = lifecycleEnabled
+    ? getLifecycleFlops({
+        activeParams: input.model.activeParams,
+        pretrainTokens: input.pretrainTokens,
+        rlTokens: input.rlTokens,
+        inferenceTokens,
+        rlInefficiency: input.rlInefficiency,
+        inferenceInefficiency: input.inferenceInefficiency,
+      })
+    : getLifecycleFlops({
+        activeParams: input.model.activeParams,
+        pretrainTokens: 0,
+        rlTokens: 0,
+        inferenceTokens: 0,
+        rlInefficiency: input.rlInefficiency,
+        inferenceInefficiency: input.inferenceInefficiency,
+      });
   const bottleneck = getBottleneck(input, weightBytesTotal, kvBytesTotal);
 
   const verdict = getVerdict(input.model.architecture, memoryUtilization);
-  const warnings = getWarnings(input, memoryUtilization, batchThreshold);
+  const warnings = getWarnings(input, memoryUtilization, batchThreshold, pipelineBubble.fraction);
   const { verdictLabel, mainReason, nextAction } = explainResult(input, verdict, bottleneck, memoryUtilization);
 
   return {
@@ -124,6 +175,13 @@ export function calculateScenario(input: ScenarioInputs): ScenarioResult {
     inferenceTokens,
     chinchillaRatio,
     bottleneck,
+    prefillTokensPerSecond,
+    decodeMfu,
+    crossoverContextTokens,
+    pipelineBubbleFraction: pipelineBubble.fraction,
+    pipelineEfficiency: pipelineBubble.efficiency,
+    microBatchCount: pipelineBubble.microBatchCount,
+    lifecycle,
   };
 }
 
@@ -216,6 +274,104 @@ export function getChinchillaRatio({
   activeParams: number;
 }): number {
   return safeDivide(inferenceTokens, 20 * activeParams);
+}
+
+// Reiner Pope's "memory-bound crossover": at this context length, the
+// per-token KV-fetch time equals the per-token compute time. Below the
+// crossover, decode throughput is bounded by FLOPs (compute-bound regime,
+// MFU close to prefill). Above it, KV bandwidth is the wall (memory-bound,
+// MFU collapses). Derived from the lecture's bytes/token = (1/300)(N/ctx).
+export function getCrossoverContextTokens({
+  flopsPerByte,
+  activeParams,
+  kvBytesPerToken,
+}: {
+  flopsPerByte: number;
+  activeParams: number;
+  kvBytesPerToken: number;
+}): number {
+  if (kvBytesPerToken <= 0 || flopsPerByte <= 0 || activeParams <= 0) return Number.NaN;
+  return activeParams / (flopsPerByte * kvBytesPerToken);
+}
+
+// Pipeline parallelism bubble. With P stages and M micro-batches in flight,
+// the standard 1F1B bubble fraction is (P-1)/(M+P-1). For inference each
+// in-flight sequence acts as one micro-batch, so M ≈ batch. PP=1 → no
+// bubble, no behavior change. PP large vs batch → big throughput hit.
+export function getPipelineBubble({
+  pipelineStages,
+  batchSize,
+}: {
+  pipelineStages: number;
+  batchSize: number;
+}): { fraction: number; efficiency: number; microBatchCount: number } {
+  const stages = Math.max(1, Math.floor(pipelineStages));
+  const microBatchCount = Math.max(1, Math.floor(batchSize));
+  if (stages === 1) {
+    return { fraction: 0, efficiency: 1, microBatchCount };
+  }
+  const fraction = (stages - 1) / (microBatchCount + stages - 1);
+  return { fraction, efficiency: 1 - fraction, microBatchCount };
+}
+
+// Reiner Pope's three-phase FLOPs accounting: pretrain (6N·D), RL (a tunable
+// multiple of 2N·D capturing forward+backward+overhead), and inference (a
+// tunable multiple of 2N·D capturing the decode-MFU penalty). The lecture's
+// equilibrium claim is D_pretrain ≈ 1.5·D_RL ≈ D_inference; the dominance
+// ratio surfaces how far from balanced this deployment actually is.
+export function getLifecycleFlops({
+  activeParams,
+  pretrainTokens,
+  rlTokens,
+  inferenceTokens,
+  rlInefficiency,
+  inferenceInefficiency,
+}: {
+  activeParams: number;
+  pretrainTokens: number;
+  rlTokens: number;
+  inferenceTokens: number;
+  rlInefficiency: number;
+  inferenceInefficiency: number;
+}): LifecycleFlops {
+  const pretrainFlops = Math.max(0, 6 * activeParams * pretrainTokens);
+  const rlFlops = Math.max(0, 2 * activeParams * rlTokens * Math.max(0, rlInefficiency));
+  const inferenceFlops = Math.max(0, 2 * activeParams * inferenceTokens * Math.max(0, inferenceInefficiency));
+  const totalFlops = pretrainFlops + rlFlops + inferenceFlops;
+  if (totalFlops <= 0) {
+    return {
+      pretrainFlops,
+      rlFlops,
+      inferenceFlops,
+      totalFlops,
+      pretrainShare: 0,
+      rlShare: 0,
+      inferenceShare: 0,
+      dominantPhase: "none",
+      dominanceRatio: Number.NaN,
+    };
+  }
+  const phases: Array<{ phase: "pretrain" | "rl" | "inference"; flops: number }> = [
+    { phase: "pretrain" as const, flops: pretrainFlops },
+    { phase: "rl" as const, flops: rlFlops },
+    { phase: "inference" as const, flops: inferenceFlops },
+  ].sort((a, b) => b.flops - a.flops);
+  const dominantPhase = phases[0].phase;
+  // Ratio against the next-largest phase. If the runner-up is zero, the
+  // dominance is effectively infinite — clamp so the UI can still render.
+  const runnerUp = phases[1].flops > 0 ? phases[1].flops : phases[2].flops;
+  const dominanceRatio = runnerUp > 0 ? phases[0].flops / runnerUp : Number.POSITIVE_INFINITY;
+  return {
+    pretrainFlops,
+    rlFlops,
+    inferenceFlops,
+    totalFlops,
+    pretrainShare: pretrainFlops / totalFlops,
+    rlShare: rlFlops / totalFlops,
+    inferenceShare: inferenceFlops / totalFlops,
+    dominantPhase,
+    dominanceRatio,
+  };
 }
 
 // Reiner Pope's all-to-all feasibility heuristic. The ratio
@@ -569,8 +725,18 @@ function explainResult(
   };
 }
 
-function getWarnings(input: ScenarioInputs, memoryUtilization: number, batchThreshold: number): string[] {
+function getWarnings(
+  input: ScenarioInputs,
+  memoryUtilization: number,
+  batchThreshold: number,
+  pipelineBubbleFraction: number,
+): string[] {
   const warnings: string[] = [];
+  if (pipelineBubbleFraction > 0.2) {
+    warnings.push(
+      `Pipeline bubble eats ≈ ${Math.round(pipelineBubbleFraction * 100)}% of throughput at this batch and pipeline depth. Raise batch (need ~P× more in-flight sequences) or drop pipeline stages.`,
+    );
+  }
   if (input.hardware.interconnect === "multi-node-network") {
     warnings.push("This hardware pool spans multiple servers; network bandwidth and latency can dominate MoE or pipeline traffic.");
   }

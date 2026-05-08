@@ -1078,6 +1078,70 @@ th {
   background: var(--ink);
 }
 
+.lifecycle-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.lifecycle-note {
+  color: var(--muted);
+  font-size: 0.92rem;
+  margin: 0;
+}
+
+.lifecycle-note code {
+  background: #eef2ef;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.86rem;
+}
+
+.lifecycle-bars {
+  display: grid;
+  gap: 12px;
+}
+
+.lifecycle-row {
+  display: grid;
+  gap: 4px;
+}
+
+.lifecycle-row-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.92rem;
+}
+
+.lifecycle-row small {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.lifecycle-bar {
+  height: 14px;
+  border-radius: 999px;
+  background: #e8ede9;
+  overflow: hidden;
+}
+
+.lifecycle-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.lifecycle-row.pretrain .lifecycle-bar i {
+  background: var(--green);
+}
+
+.lifecycle-row.rl .lifecycle-bar i {
+  background: var(--amber);
+}
+
+.lifecycle-row.inference .lifecycle-bar i {
+  background: var(--ink);
+}
+
 .latency-svg {
   width: 100%;
   min-height: 250px;
