@@ -711,6 +711,13 @@ button:focus-visible {
   font-weight: 800;
 }
 
+.segmented button:disabled,
+.segmented button.unsupported {
+  opacity: 0.4;
+  cursor: not-allowed;
+  text-decoration: line-through;
+}
+
 .field small {
   color: var(--muted);
   font-size: 0.78rem;

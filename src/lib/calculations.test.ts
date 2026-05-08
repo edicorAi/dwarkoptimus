@@ -100,6 +100,39 @@ describe("precision-aware batch threshold", () => {
       }),
     ).toBeCloseTo(12500);
   });
+
+  it("does NOT upscale on Hopper when weights are narrower than native fp8", () => {
+    // Hopper has no fp4 tensor cores. Loading fp4 weights still runs matmul
+    // at fp8 after dequant, so peak FLOPs (and therefore the threshold) are
+    // unchanged from the fp8 case.
+    const fp8 = getBatchThreshold({
+      flopsPerByte: 590,
+      totalParams: 80e9,
+      activeParams: 3e9,
+      weightBytesPerParam: 1,
+      nativeComputeBytes: 1,
+    });
+    const fp4 = getBatchThreshold({
+      flopsPerByte: 590,
+      totalParams: 80e9,
+      activeParams: 3e9,
+      weightBytesPerParam: 0.5,
+      nativeComputeBytes: 1,
+    });
+    expect(fp4).toBeCloseTo(fp8);
+  });
+
+  it("does NOT upscale on Apple Silicon when MLX-style int4 is selected", () => {
+    // Apple GPUs have no fp8/fp4 tensor path — MLX int4 saves memory but the
+    // matmul still runs at fp16. Threshold stays at the bf16 level regardless
+    // of whether weights are stored at 2, 1, or 0.5 B/param.
+    const m4Max = { flopsPerByte: 66, totalParams: 70e9, activeParams: 70e9, nativeComputeBytes: 2 };
+    const bf16 = getBatchThreshold({ ...m4Max, weightBytesPerParam: 2 });
+    const fp8 = getBatchThreshold({ ...m4Max, weightBytesPerParam: 1 });
+    const fp4 = getBatchThreshold({ ...m4Max, weightBytesPerParam: 0.5 });
+    expect(fp8).toBeCloseTo(bf16);
+    expect(fp4).toBeCloseTo(bf16);
+  });
 });
 
 describe("bottleneck classifier", () => {

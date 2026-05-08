@@ -55,6 +55,24 @@ const kvSliderMin = 512;
 const kvSliderMax = 2_000_000;
 const defaultServingBatch = 128;
 
+// A precision mode is hardware-supported when its bytes/param meet or exceed
+// the hardware's smallest native tensor-core precision. Picking a narrower
+// mode would only pretend to unlock more compute — see the clamp in
+// getBatchThreshold. "Custom" is always allowed (escape hatch).
+function isPrecisionSupported(mode: PrecisionMode, hardware: HardwarePreset): boolean {
+  if (mode === "custom") return true;
+  const bytes = precisionModes[mode].bytes;
+  return bytes !== null && bytes >= hardware.nativeComputeBytes;
+}
+
+// Pick the lowest-byte precision the hardware natively supports — used as the
+// fallback when the user switches to hardware that doesn't support the
+// currently-selected precision.
+function defaultPrecisionForHardware(hardware: HardwarePreset): PrecisionMode {
+  const ordered: PrecisionMode[] = ["fp4", "fp8", "bf16"];
+  return ordered.find((mode) => isPrecisionSupported(mode, hardware)) ?? "bf16";
+}
+
 // Display order + label for hardware categories. Used to group both the
 // Planner Hardware <select> (via <optgroup>) and the Settings inventory.
 const hardwareCategoryOrder: HardwareCategory[] = [
@@ -199,6 +217,10 @@ function App() {
     const next = hardwarePresets.find((item) => item.id === nextId) ?? hardwarePresets[0];
     setHardwareId(next.id);
     setExpertParallelism(next.gpuCount);
+    // If the currently-selected precision isn't natively supported by the
+    // new hardware, fall back to the smallest one that is. Custom is left
+    // alone — the user is explicitly overriding storage precision there.
+    setPrecision((current) => (isPrecisionSupported(current, next) ? current : defaultPrecisionForHardware(next)));
   }
 
   function toggleHardware(nextId: string) {
@@ -448,11 +470,25 @@ function App() {
                 Bytes used to store each model parameter. Smaller precision shrinks the weight footprint linearly (FP4 is ¼ the size of BF16) and unlocks more tensor-core throughput on hardware that supports it — but quality and kernel maturity get worse as you go down. Pick the smallest precision your model card and runtime actually support.
               </FieldHint>
               <div className="segmented">
-                {(Object.keys(precisionModes) as PrecisionMode[]).map((mode) => (
-                  <button key={mode} type="button" className={mode === precision ? "active" : ""} onClick={() => setPrecision(mode)}>
-                    {precisionModes[mode].label}
-                  </button>
-                ))}
+                {(Object.keys(precisionModes) as PrecisionMode[]).map((mode) => {
+                  const supported = isPrecisionSupported(mode, hardware);
+                  const className = `${mode === precision ? "active" : ""} ${supported ? "" : "unsupported"}`.trim();
+                  const title = supported
+                    ? precisionModes[mode].label
+                    : `${precisionModes[mode].label} — not natively supported on ${hardware.label}. Use Custom if you want to override.`;
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={className}
+                      onClick={() => setPrecision(mode)}
+                      disabled={!supported}
+                      title={title}
+                    >
+                      {precisionModes[mode].label}
+                    </button>
+                  );
+                })}
               </div>
               <small>{precisionModes[precision].note}</small>
               <PrecisionExplainer

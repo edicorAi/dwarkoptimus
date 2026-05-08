@@ -202,9 +202,18 @@ export function getBatchThreshold({
   weightBytesPerParam?: number;
   nativeComputeBytes?: number;
 }): number {
+  // Precision rescaling is asymmetric:
+  // - WIDER than native (e.g. bf16 weights on a Blackwell measured at fp4):
+  //   peak FLOPs drop linearly, so the threshold drops too. Scale = nc/w < 1.
+  // - NARROWER than native (e.g. fp4 weights on a Hopper or Apple Silicon):
+  //   the hardware has no tensor-core path at that precision, so the matmul
+  //   runs at the native rate after dequant. No compute boost. Scale clamps
+  //   to 1 — going narrower saves memory but not throughput.
   const precisionScale =
     weightBytesPerParam && weightBytesPerParam > 0 && nativeComputeBytes && nativeComputeBytes > 0
-      ? nativeComputeBytes / weightBytesPerParam
+      ? weightBytesPerParam >= nativeComputeBytes
+        ? nativeComputeBytes / weightBytesPerParam
+        : 1
       : 1;
   return safeDivide(flopsPerByte * precisionScale * totalParams, activeParams);
 }
