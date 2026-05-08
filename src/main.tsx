@@ -23,7 +23,7 @@ import {
   type HfSearchHit,
 } from "./lib/huggingface";
 import { formatBytes, formatCompact, formatNumber, formatTime } from "./lib/units";
-import type { HardwarePreset, ModelPreset, PrecisionMode, ScenarioInputs, ServingPlan } from "./types";
+import type { HardwareCategory, HardwarePreset, ModelPreset, PrecisionMode, ScenarioInputs, ServingPlan } from "./types";
 import "./styles.css";
 
 type AppTab = "planner" | "docs" | "settings";
@@ -54,6 +54,38 @@ const precisionModes: Record<PrecisionMode, { label: string; bytes: number | nul
 const kvSliderMin = 512;
 const kvSliderMax = 2_000_000;
 const defaultServingBatch = 128;
+
+// Display order + label for hardware categories. Used to group both the
+// Planner Hardware <select> (via <optgroup>) and the Settings inventory.
+const hardwareCategoryOrder: HardwareCategory[] = [
+  "nvidia-blackwell",
+  "nvidia-hopper",
+  "nvidia-ampere",
+  "nvidia-consumer",
+  "nvidia-legacy",
+  "apple-silicon",
+];
+
+const hardwareCategoryLabel: Record<HardwareCategory, string> = {
+  "nvidia-blackwell": "NVIDIA Blackwell (B-series)",
+  "nvidia-hopper": "NVIDIA Hopper (H-series)",
+  "nvidia-ampere": "NVIDIA Ampere (A-series)",
+  "nvidia-consumer": "NVIDIA RTX / consumer & workstation",
+  "nvidia-legacy": "NVIDIA legacy (Volta)",
+  "apple-silicon": "Apple Silicon (MacBook Pro / Mac mini)",
+};
+
+function groupHardwareByCategory(presets: HardwarePreset[]): Array<{ category: HardwareCategory; items: HardwarePreset[] }> {
+  const buckets = new Map<HardwareCategory, HardwarePreset[]>();
+  for (const preset of presets) {
+    const list = buckets.get(preset.category) ?? [];
+    list.push(preset);
+    buckets.set(preset.category, list);
+  }
+  return hardwareCategoryOrder
+    .filter((category) => buckets.has(category))
+    .map((category) => ({ category, items: buckets.get(category)! }));
+}
 
 function App() {
   const defaultHardwareIds = ["dell-b300-8gpu", "h200-pool-16gpu", "h200-server-4gpu"];
@@ -172,6 +204,21 @@ function App() {
   function toggleHardware(nextId: string) {
     setEnabledHardwareIds((current) => {
       const next = current.includes(nextId) ? current.filter((id) => id !== nextId) : [...current, nextId];
+      if (next.length > 0 && !next.includes(hardwareId)) {
+        applyHardware(next[0]);
+      }
+      return next;
+    });
+  }
+
+  function setHardwareEnabled(ids: string[], enabled: boolean) {
+    setEnabledHardwareIds((current) => {
+      const set = new Set(current);
+      for (const id of ids) {
+        if (enabled) set.add(id);
+        else set.delete(id);
+      }
+      const next = Array.from(set);
       if (next.length > 0 && !next.includes(hardwareId)) {
         applyHardware(next[0]);
       }
@@ -307,10 +354,14 @@ function App() {
             )}
             <Field label="Hardware" help="Only hardware enabled in Settings appears here. Use Settings to match the planner to your inventory.">
               <select value={hardware.id} onChange={(event) => applyHardware(event.target.value)}>
-                {plannerHardwarePresets.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.label}
-                  </option>
+                {groupHardwareByCategory(plannerHardwarePresets).map(({ category, items }) => (
+                  <optgroup key={category} label={hardwareCategoryLabel[category]}>
+                    {items.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </Field>
@@ -535,6 +586,7 @@ function App() {
           selectedHardwareId={hardware.id}
           onToggleHardware={toggleHardware}
           onSelectHardware={applyHardware}
+          onSetEnabled={setHardwareEnabled}
         />
       )}
     </main>
@@ -1145,13 +1197,16 @@ function SettingsPanel({
   selectedHardwareId,
   onToggleHardware,
   onSelectHardware,
+  onSetEnabled,
 }: {
   enabledHardwareIds: string[];
   selectedHardwareId: string;
   onToggleHardware: (id: string) => void;
   onSelectHardware: (id: string) => void;
+  onSetEnabled: (ids: string[], enabled: boolean) => void;
 }) {
   const selectedCount = enabledHardwareIds.length;
+  const grouped = groupHardwareByCategory(hardwarePresets);
 
   return (
     <section className="settings-shell">
@@ -1159,42 +1214,63 @@ function SettingsPanel({
         <div>
           <h2>Settings</h2>
           <p>
-            Choose the NVIDIA hardware you actually have. The Planner hardware dropdown and comparison table will only use
-            the selected inventory.
+            Choose the hardware you actually have. The Planner hardware dropdown and comparison table will only use
+            the selected inventory. Each section below is a hardware family — toggle individual SKUs or enable/disable
+            a whole family at once.
           </p>
         </div>
         <Badge tone={selectedCount > 0 ? "user-provided" : "unknown"}>{selectedCount} enabled</Badge>
       </article>
 
-      <article className="panel">
-        <div className="panel-heading">
-          <div>
-            <h2>Hardware inventory</h2>
-            <span>NVIDIA accelerators and common server shapes</span>
-          </div>
-        </div>
-
-        <div className="hardware-catalog">
-          {hardwarePresets.map((item) => {
-            const enabled = enabledHardwareIds.includes(item.id);
-            return (
-              <label key={item.id} className={`hardware-card ${enabled ? "enabled" : ""}`}>
-                <input type="checkbox" checked={enabled} onChange={() => onToggleHardware(item.id)} />
-                <div>
-                  <strong>{item.label}</strong>
-                  <span>
-                    {item.gpuCount} GPU · {formatBytes(item.memoryBytesPerGpu)} HBM / GPU · {formatBytes(item.memoryBandwidthBytesPerSecondPerGpu)}/s
-                  </span>
-                  <small>{item.notes}</small>
-                </div>
-                <button type="button" className="secondary-button" onClick={() => onSelectHardware(item.id)} disabled={!enabled || item.id === selectedHardwareId}>
-                  {item.id === selectedHardwareId ? "Active" : "Use"}
-                </button>
-              </label>
-            );
-          })}
-        </div>
-      </article>
+      {grouped.map(({ category, items }) => {
+        const ids = items.map((item) => item.id);
+        const enabledInGroup = ids.filter((id) => enabledHardwareIds.includes(id)).length;
+        const allEnabled = enabledInGroup === ids.length;
+        return (
+          <article key={category} className="panel">
+            <div className="panel-heading">
+              <div>
+                <h2>{hardwareCategoryLabel[category]}</h2>
+                <span>
+                  {enabledInGroup} of {ids.length} enabled
+                </span>
+              </div>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => onSetEnabled(ids, !allEnabled)}
+              >
+                {allEnabled ? "Disable all" : "Enable all"}
+              </button>
+            </div>
+            <div className="hardware-catalog">
+              {items.map((item) => {
+                const enabled = enabledHardwareIds.includes(item.id);
+                return (
+                  <label key={item.id} className={`hardware-card ${enabled ? "enabled" : ""}`}>
+                    <input type="checkbox" checked={enabled} onChange={() => onToggleHardware(item.id)} />
+                    <div>
+                      <strong>{item.label}</strong>
+                      <span>
+                        {item.gpuCount} GPU · {formatBytes(item.memoryBytesPerGpu)} / GPU · {formatBytes(item.memoryBandwidthBytesPerSecondPerGpu)}/s
+                      </span>
+                      <small>{item.notes}</small>
+                    </div>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => onSelectHardware(item.id)}
+                      disabled={!enabled || item.id === selectedHardwareId}
+                    >
+                      {item.id === selectedHardwareId ? "Active" : "Use"}
+                    </button>
+                  </label>
+                );
+              })}
+            </div>
+          </article>
+        );
+      })}
     </section>
   );
 }

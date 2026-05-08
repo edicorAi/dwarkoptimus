@@ -3,16 +3,24 @@ export type Confidence = "source-backed" | "estimated" | "user-provided" | "unkn
 export type Interconnect = "single-node-nvlink" | "multi-node-network" | "rack-nvl" | "single-gpu";
 export type PrecisionMode = "bf16" | "fp8" | "fp4" | "custom";
 export type Verdict = "fits" | "tight" | "does-not-fit" | "not-applicable";
+export type HardwareCategory =
+  | "nvidia-blackwell"
+  | "nvidia-hopper"
+  | "nvidia-ampere"
+  | "nvidia-consumer"
+  | "nvidia-legacy"
+  | "apple-silicon";
 
 export type HardwarePreset = {
   id: string;
   label: string;
+  category: HardwareCategory;
   gpuCount: number;
   memoryBytesPerGpu: number;
   memoryBandwidthBytesPerSecondPerGpu: number;
   flopsPerByte: number;
   // Bytes-per-param at the precision flopsPerByte was measured at.
-  // 0.5 = fp4 (Blackwell), 1 = fp8 (Hopper), 2 = bf16 (Ampere/Ada).
+  // 0.5 = fp4 (Blackwell), 1 = fp8 (Hopper), 2 = bf16 (Ampere/Ada/Apple).
   // Used to rescale roofline math when serving at a different precision than the spec.
   nativeComputeBytes: number;
   interconnect: Interconnect;

@@ -1,9 +1,23 @@
 import type { HardwarePreset } from "../types";
 
+// Apple Silicon notes (apply to every Apple-Silicon preset below):
+// - Memory is unified — weights, KV cache, and the OS share one pool. The
+//   default 0.8 safety margin already discounts ~20% for OS + apps, but on
+//   smaller configs (≤16 GB) you may need to lower it further.
+// - Lowest precision Apple GPUs run natively is fp16/bf16. The FP4/FP8
+//   precision toggle in the Planner will rescale memory but does not match
+//   any Apple hardware path — int4 quants under llama.cpp/MLX still execute
+//   matmul at fp16, so realised throughput is closer to the bf16 row.
+// - flopsPerByte uses theoretical fp16 GPU peak (≈ 2 × public fp32 TFLOPS)
+//   over the chip's published memory bandwidth. Realised MPS throughput is
+//   typically 30–50% of peak, so most LLM serving on these will be HBM-bound
+//   in practice — which the bottleneck classifier already says.
+
 export const hardwarePresets: HardwarePreset[] = [
   {
     id: "dell-b300-8gpu",
     label: "NVIDIA B300 server (8x GPU)",
+    category: "nvidia-blackwell",
     gpuCount: 8,
     memoryBytesPerGpu: 288e9,
     memoryBandwidthBytesPerSecondPerGpu: 8e12,
@@ -18,6 +32,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "gb300-nvl72",
     label: "NVIDIA GB300 NVL72 rack (72x GPU)",
+    category: "nvidia-blackwell",
     gpuCount: 72,
     memoryBytesPerGpu: 288e9,
     memoryBandwidthBytesPerSecondPerGpu: 8e12,
@@ -31,6 +46,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "b200-8gpu",
     label: "NVIDIA B200 server (8x GPU)",
+    category: "nvidia-blackwell",
     gpuCount: 8,
     memoryBytesPerGpu: 192e9,
     memoryBandwidthBytesPerSecondPerGpu: 8e12,
@@ -44,6 +60,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "gb200-nvl72",
     label: "NVIDIA GB200 NVL72 rack (72x GPU)",
+    category: "nvidia-blackwell",
     gpuCount: 72,
     memoryBytesPerGpu: 192e9,
     memoryBandwidthBytesPerSecondPerGpu: 8e12,
@@ -55,8 +72,23 @@ export const hardwarePresets: HardwarePreset[] = [
     sources: ["NVIDIA GB200 NVL72 public specs"],
   },
   {
+    id: "b300-1gpu",
+    label: "NVIDIA B300 / GB300 (1x GPU)",
+    category: "nvidia-blackwell",
+    gpuCount: 1,
+    memoryBytesPerGpu: 288e9,
+    memoryBandwidthBytesPerSecondPerGpu: 8e12,
+    flopsPerByte: 1875,
+    nativeComputeBytes: 0.5,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes: "Single B300-style reference derived from GB300 NVL72 rack totals.",
+    sources: ["NVIDIA GB300 NVL72 public specs"],
+  },
+  {
     id: "h200-pool-16gpu",
     label: "NVIDIA H200 pool (4 servers, 16x GPU)",
+    category: "nvidia-hopper",
     gpuCount: 16,
     memoryBytesPerGpu: 141e9,
     memoryBandwidthBytesPerSecondPerGpu: 4.8e12,
@@ -71,6 +103,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "h200-server-4gpu",
     label: "NVIDIA H200 server (4x GPU)",
+    category: "nvidia-hopper",
     gpuCount: 4,
     memoryBytesPerGpu: 141e9,
     memoryBandwidthBytesPerSecondPerGpu: 4.8e12,
@@ -84,6 +117,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "h200-sxm-1gpu",
     label: "NVIDIA H200 SXM (1x GPU)",
+    category: "nvidia-hopper",
     gpuCount: 1,
     memoryBytesPerGpu: 141e9,
     memoryBandwidthBytesPerSecondPerGpu: 4.8e12,
@@ -97,6 +131,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "h100-sxm-8gpu",
     label: "NVIDIA H100 SXM server (8x GPU)",
+    category: "nvidia-hopper",
     gpuCount: 8,
     memoryBytesPerGpu: 80e9,
     memoryBandwidthBytesPerSecondPerGpu: 3.35e12,
@@ -110,6 +145,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "h100-nvl-2gpu",
     label: "NVIDIA H100 NVL (2x GPU)",
+    category: "nvidia-hopper",
     gpuCount: 2,
     memoryBytesPerGpu: 94e9,
     memoryBandwidthBytesPerSecondPerGpu: 3.9e12,
@@ -123,6 +159,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "h100-sxm-1gpu",
     label: "NVIDIA H100 SXM (1x GPU)",
+    category: "nvidia-hopper",
     gpuCount: 1,
     memoryBytesPerGpu: 80e9,
     memoryBandwidthBytesPerSecondPerGpu: 3.35e12,
@@ -136,6 +173,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "a100-sxm-8gpu",
     label: "NVIDIA A100 SXM server (8x GPU)",
+    category: "nvidia-ampere",
     gpuCount: 8,
     memoryBytesPerGpu: 80e9,
     memoryBandwidthBytesPerSecondPerGpu: 2e12,
@@ -149,6 +187,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "a100-sxm-1gpu",
     label: "NVIDIA A100 SXM 80GB (1x GPU)",
+    category: "nvidia-ampere",
     gpuCount: 1,
     memoryBytesPerGpu: 80e9,
     memoryBandwidthBytesPerSecondPerGpu: 2e12,
@@ -162,6 +201,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "l40s-1gpu",
     label: "NVIDIA L40S (1x GPU)",
+    category: "nvidia-consumer",
     gpuCount: 1,
     memoryBytesPerGpu: 48e9,
     memoryBandwidthBytesPerSecondPerGpu: 864e9,
@@ -173,21 +213,9 @@ export const hardwarePresets: HardwarePreset[] = [
     sources: ["NVIDIA L40S public specs"],
   },
   {
-    id: "b300-1gpu",
-    label: "NVIDIA B300 / GB300 (1x GPU)",
-    gpuCount: 1,
-    memoryBytesPerGpu: 288e9,
-    memoryBandwidthBytesPerSecondPerGpu: 8e12,
-    flopsPerByte: 1875,
-    nativeComputeBytes: 0.5,
-    interconnect: "single-gpu",
-    confidence: "estimated",
-    notes: "Single B300-style reference derived from GB300 NVL72 rack totals.",
-    sources: ["NVIDIA GB300 NVL72 public specs"],
-  },
-  {
     id: "l4-1gpu",
     label: "NVIDIA L4 (1x GPU)",
+    category: "nvidia-consumer",
     gpuCount: 1,
     memoryBytesPerGpu: 24e9,
     memoryBandwidthBytesPerSecondPerGpu: 300e9,
@@ -202,6 +230,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "rtx-5090-1gpu",
     label: "NVIDIA GeForce RTX 5090 (1x GPU)",
+    category: "nvidia-consumer",
     gpuCount: 1,
     memoryBytesPerGpu: 32e9,
     memoryBandwidthBytesPerSecondPerGpu: 1792e9,
@@ -216,6 +245,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "rtx-4090-1gpu",
     label: "NVIDIA GeForce RTX 4090 (1x GPU)",
+    category: "nvidia-consumer",
     gpuCount: 1,
     memoryBytesPerGpu: 24e9,
     memoryBandwidthBytesPerSecondPerGpu: 1008e9,
@@ -230,6 +260,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "rtx-a6000-1gpu",
     label: "NVIDIA RTX A6000 (1x GPU)",
+    category: "nvidia-consumer",
     gpuCount: 1,
     memoryBytesPerGpu: 48e9,
     memoryBandwidthBytesPerSecondPerGpu: 768e9,
@@ -244,6 +275,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "rtx-3090-1gpu",
     label: "NVIDIA GeForce RTX 3090 (1x GPU)",
+    category: "nvidia-consumer",
     gpuCount: 1,
     memoryBytesPerGpu: 24e9,
     memoryBandwidthBytesPerSecondPerGpu: 936e9,
@@ -258,6 +290,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "v100-sxm2-32gb-1gpu",
     label: "NVIDIA Tesla V100 SXM2 32GB (1x GPU)",
+    category: "nvidia-legacy",
     gpuCount: 1,
     memoryBytesPerGpu: 32e9,
     memoryBandwidthBytesPerSecondPerGpu: 900e9,
@@ -272,6 +305,7 @@ export const hardwarePresets: HardwarePreset[] = [
   {
     id: "v100-sxm2-16gb-1gpu",
     label: "NVIDIA Tesla V100 SXM2 16GB (1x GPU)",
+    category: "nvidia-legacy",
     gpuCount: 1,
     memoryBytesPerGpu: 16e9,
     memoryBandwidthBytesPerSecondPerGpu: 900e9,
@@ -282,5 +316,292 @@ export const hardwarePresets: HardwarePreset[] = [
     notes:
       "Original V100 SKU. Same Volta compute as the 32 GB variant, half the HBM. Long context fills it fast.",
     sources: ["NVIDIA Tesla V100 datasheet"],
+  },
+
+  // -------------------------------------------------------------------------
+  // Apple Silicon (MacBook Pro + Mac mini, M1 → M4 generations)
+  // Bandwidth and core counts taken from Apple's published specs.
+  // flopsPerByte = 2 × public fp32 TFLOPS / memory bandwidth (rough fp16 peak).
+  // See top-of-file notes for the unified-memory and precision caveats.
+  // -------------------------------------------------------------------------
+
+  // ---- MacBook Pro M1 generation ----
+  {
+    id: "mbp-m1-pro-16gb",
+    label: "MacBook Pro 14″ M1 Pro — 16 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 16e9,
+    memoryBandwidthBytesPerSecondPerGpu: 200e9,
+    flopsPerByte: 52,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M1 Pro with 16-core GPU, 16 GB unified memory, 200 GB/s. Tight for anything beyond 7B at int4 — KV cache fills the rest.",
+    sources: ["Apple M1 Pro tech specs"],
+  },
+  {
+    id: "mbp-m1-max-32gb",
+    label: "MacBook Pro 14/16″ M1 Max — 32 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 32e9,
+    memoryBandwidthBytesPerSecondPerGpu: 400e9,
+    flopsPerByte: 52,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M1 Max with 32-core GPU, 32 GB unified memory, 400 GB/s. Comfortable for ≤13B fp16 or ≤30B int4 quants.",
+    sources: ["Apple M1 Max tech specs"],
+  },
+  {
+    id: "mbp-m1-max-64gb",
+    label: "MacBook Pro 14/16″ M1 Max — 64 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 64e9,
+    memoryBandwidthBytesPerSecondPerGpu: 400e9,
+    flopsPerByte: 52,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M1 Max top BTO config. 64 GB unified, 400 GB/s. Enough memory for 30B fp16 or 70B int4 quants; bandwidth caps tokens/sec.",
+    sources: ["Apple M1 Max tech specs"],
+  },
+
+  // ---- MacBook Pro M2 generation ----
+  {
+    id: "mbp-m2-pro-32gb",
+    label: "MacBook Pro 14/16″ M2 Pro — 32 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 32e9,
+    memoryBandwidthBytesPerSecondPerGpu: 200e9,
+    flopsPerByte: 68,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M2 Pro 19-core GPU, 32 GB unified, 200 GB/s. Compute is up vs M1 Pro but bandwidth is identical — still HBM-bound for serving.",
+    sources: ["Apple M2 Pro tech specs"],
+  },
+  {
+    id: "mbp-m2-max-64gb",
+    label: "MacBook Pro 14/16″ M2 Max — 64 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 64e9,
+    memoryBandwidthBytesPerSecondPerGpu: 400e9,
+    flopsPerByte: 68,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M2 Max 38-core GPU, 64 GB unified, 400 GB/s. Same memory footprint as M1 Max BTO with ~30% more compute.",
+    sources: ["Apple M2 Max tech specs"],
+  },
+  {
+    id: "mbp-m2-max-96gb",
+    label: "MacBook Pro 16″ M2 Max — 96 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 96e9,
+    memoryBandwidthBytesPerSecondPerGpu: 400e9,
+    flopsPerByte: 68,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M2 Max top BTO at 96 GB. Comfortably fits 70B int4 with substantial KV headroom.",
+    sources: ["Apple M2 Max tech specs"],
+  },
+
+  // ---- MacBook Pro M3 generation ----
+  {
+    id: "mbp-m3-pro-36gb",
+    label: "MacBook Pro 14/16″ M3 Pro — 36 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 36e9,
+    memoryBandwidthBytesPerSecondPerGpu: 150e9,
+    flopsPerByte: 99,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M3 Pro 18-core GPU, 36 GB unified, 150 GB/s — bandwidth regressed from M2 Pro. Decode tokens/sec on this chip will lag M2 Pro on the same model.",
+    sources: ["Apple M3 Pro tech specs"],
+  },
+  {
+    id: "mbp-m3-max-64gb",
+    label: "MacBook Pro 14/16″ M3 Max — 64 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 64e9,
+    memoryBandwidthBytesPerSecondPerGpu: 300e9,
+    flopsPerByte: 109,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M3 Max with the 14-core CPU / 30-core GPU + 300 GB/s memory bus. The 16-core CPU SKU instead gets 400 GB/s — pick the 16-core if serving LLMs.",
+    sources: ["Apple M3 Max tech specs"],
+  },
+  {
+    id: "mbp-m3-max-96gb",
+    label: "MacBook Pro 16″ M3 Max (16-core CPU) — 96 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 96e9,
+    memoryBandwidthBytesPerSecondPerGpu: 400e9,
+    flopsPerByte: 82,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M3 Max 16-core CPU / 40-core GPU at 400 GB/s — the LLM-friendly variant. 96 GB unified is enough for 70B int4 with comfortable KV.",
+    sources: ["Apple M3 Max tech specs"],
+  },
+  {
+    id: "mbp-m3-max-128gb",
+    label: "MacBook Pro 16″ M3 Max (16-core CPU) — 128 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 128e9,
+    memoryBandwidthBytesPerSecondPerGpu: 400e9,
+    flopsPerByte: 82,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M3 Max top BTO at 128 GB unified. Genuinely competitive with single H100 80GB on memory; bandwidth (400 vs 3350 GB/s) is the catch.",
+    sources: ["Apple M3 Max tech specs"],
+  },
+
+  // ---- MacBook Pro M4 generation ----
+  {
+    id: "mbp-m4-pro-48gb",
+    label: "MacBook Pro 14/16″ M4 Pro — 48 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 48e9,
+    memoryBandwidthBytesPerSecondPerGpu: 273e9,
+    flopsPerByte: 67,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M4 Pro 20-core GPU, 48 GB unified, 273 GB/s. Bandwidth back to M2 Pro territory after the M3 Pro regression.",
+    sources: ["Apple M4 Pro tech specs"],
+  },
+  {
+    id: "mbp-m4-max-48gb",
+    label: "MacBook Pro 14/16″ M4 Max — 48 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 48e9,
+    memoryBandwidthBytesPerSecondPerGpu: 546e9,
+    flopsPerByte: 66,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M4 Max 32-core GPU, 48 GB unified, 546 GB/s — highest bandwidth in any laptop. Decode throughput meaningfully better than M3 Max.",
+    sources: ["Apple M4 Max tech specs"],
+  },
+  {
+    id: "mbp-m4-max-64gb",
+    label: "MacBook Pro 14/16″ M4 Max — 64 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 64e9,
+    memoryBandwidthBytesPerSecondPerGpu: 546e9,
+    flopsPerByte: 66,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M4 Max 40-core GPU at 64 GB / 546 GB/s. Sweet spot for local 70B int4 serving with batch ≥ 1.",
+    sources: ["Apple M4 Max tech specs"],
+  },
+  {
+    id: "mbp-m4-max-128gb",
+    label: "MacBook Pro 16″ M4 Max — 128 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 128e9,
+    memoryBandwidthBytesPerSecondPerGpu: 546e9,
+    flopsPerByte: 66,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M4 Max top BTO at 128 GB. Best laptop available for local LLM serving — the only thing the H100 still beats it at is bandwidth.",
+    sources: ["Apple M4 Max tech specs"],
+  },
+
+  // ---- Mac mini ----
+  {
+    id: "mac-mini-m2-pro-32gb",
+    label: "Mac mini M2 Pro — 32 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 32e9,
+    memoryBandwidthBytesPerSecondPerGpu: 200e9,
+    flopsPerByte: 68,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "Mac mini M2 Pro 19-core GPU, 32 GB unified, 200 GB/s. Same chip as the MacBook Pro M2 Pro — desktop form factor, lower price.",
+    sources: ["Apple Mac mini (M2 Pro) tech specs"],
+  },
+  {
+    id: "mac-mini-m4-24gb",
+    label: "Mac mini M4 — 24 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 24e9,
+    memoryBandwidthBytesPerSecondPerGpu: 120e9,
+    flopsPerByte: 75,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "Base M4 Mac mini at 24 GB unified, 120 GB/s. Cheap entry point for local 7B–13B int4 serving; bandwidth is the bottleneck.",
+    sources: ["Apple Mac mini (M4) tech specs"],
+  },
+  {
+    id: "mac-mini-m4-pro-48gb",
+    label: "Mac mini M4 Pro — 48 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 48e9,
+    memoryBandwidthBytesPerSecondPerGpu: 273e9,
+    flopsPerByte: 67,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "Mac mini M4 Pro 20-core GPU, 48 GB unified, 273 GB/s. Best price/perf in the Apple lineup for local serving as of late 2024.",
+    sources: ["Apple Mac mini (M4 Pro) tech specs"],
+  },
+  {
+    id: "mac-mini-m4-pro-64gb",
+    label: "Mac mini M4 Pro — 64 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 64e9,
+    memoryBandwidthBytesPerSecondPerGpu: 273e9,
+    flopsPerByte: 67,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "Mac mini M4 Pro top BTO at 64 GB. Headroom for 70B int4 quants. Same memory footprint as MBP M4 Max 64 GB at half the bandwidth.",
+    sources: ["Apple Mac mini (M4 Pro) tech specs"],
   },
 ];
