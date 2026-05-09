@@ -718,6 +718,22 @@ button:focus-visible {
   text-decoration: line-through;
 }
 
+.kv-quant-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.kv-quant-cell {
+  display: grid;
+  gap: 4px;
+}
+
+.kv-quant-cell span {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
 .field small {
   color: var(--muted);
   font-size: 0.78rem;

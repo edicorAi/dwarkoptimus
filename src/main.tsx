@@ -55,6 +55,40 @@ const kvSliderMin = 512;
 const kvSliderMax = 2_000_000;
 const defaultServingBatch = 128;
 
+// llama.cpp / LM Studio K and V cache quantization types. Bytes-per-element
+// figures are derived from the GGUF block sizes (32 elements per block):
+//   Q8_0 → 32 vals + 2-byte scale = 34/32 ≈ 1.0625
+//   Q5_0 → 20 + 2 = 22/32 ≈ 0.6875        Q5_1 → 22 + 2 = 24/32 = 0.75
+//   Q4_0 → 16 + 2 = 18/32 = 0.5625        Q4_1 → 16 + 2 + 2 = 20/32 = 0.625
+//   IQ4_NL → same payload as Q4_0
+// The two are picked independently in LM Studio, so we track them separately
+// and let the calculator's kvBytesPerToken track the effective sum.
+type KvQuantType = "f32" | "f16" | "q8_0" | "q5_1" | "q5_0" | "q4_1" | "q4_0" | "iq4_nl";
+
+const kvQuantBytes: Record<KvQuantType, number> = {
+  f32: 4.0,
+  f16: 2.0,
+  q8_0: 1.0625,
+  q5_1: 0.75,
+  q5_0: 0.6875,
+  q4_1: 0.625,
+  q4_0: 0.5625,
+  iq4_nl: 0.5625,
+};
+
+const kvQuantLabels: Record<KvQuantType, string> = {
+  f32: "F32",
+  f16: "F16 (default)",
+  q8_0: "Q8_0",
+  q5_1: "Q5_1",
+  q5_0: "Q5_0",
+  q4_1: "Q4_1",
+  q4_0: "Q4_0",
+  iq4_nl: "IQ4_NL",
+};
+
+const kvQuantOrder: KvQuantType[] = ["f32", "f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl"];
+
 // A precision mode is hardware-supported when its bytes/param meet or exceed
 // the hardware's smallest native tensor-core precision. Picking a narrower
 // mode would only pretend to unlock more compute — see the clamp in
@@ -116,6 +150,10 @@ function App() {
   const [batchSize, setBatchSize] = useState(defaultServingBatch);
   const [customWeightBytes, setCustomWeightBytes] = useState(0.5);
   const [kvBytesPerToken, setKvBytesPerToken] = useState(modelPresets[0].kvBytesPerToken);
+  // K and V cache quantization (matches LM Studio / llama.cpp). Both default
+  // to F16 — that's the baseline every model preset's kvBytesPerToken assumes.
+  const [kCacheType, setKCacheType] = useState<KvQuantType>("f16");
+  const [vCacheType, setVCacheType] = useState<KvQuantType>("f16");
   const [tokensPerSecond, setTokensPerSecond] = useState(0);
   const [deploymentDays, setDeploymentDays] = useState(60);
   const [hfPresets, setHfPresets] = useState<ModelPreset[]>(() => loadCachedHfPresets());
@@ -253,6 +291,10 @@ function App() {
     setModelId(next.id);
     setContextTokens(next.contextTokens);
     setKvBytesPerToken(next.kvBytesPerToken);
+    // Each model preset's kvBytesPerToken is its F16/F16 baseline. Reset the
+    // K/V quant pickers so subsequent quant changes scale from the baseline.
+    setKCacheType("f16");
+    setVCacheType("f16");
     setBatchSize(defaultServingBatch);
     setPrecision(next.defaultWeightBytesPerParam <= 0.5 ? "fp4" : next.defaultWeightBytesPerParam <= 1 ? "fp8" : "bf16");
     setCustomWeightBytes(next.defaultWeightBytesPerParam);
@@ -424,6 +466,8 @@ function App() {
                 setModelId(preset.id);
                 setContextTokens(preset.contextTokens);
                 setKvBytesPerToken(preset.kvBytesPerToken);
+                setKCacheType("f16");
+                setVCacheType("f16");
                 setBatchSize(defaultServingBatch);
                 setPrecision(
                   preset.defaultWeightBytesPerParam <= 0.5
@@ -500,6 +544,19 @@ function App() {
             {precision === "custom" && (
               <NumberField label="Custom bytes / param" value={customWeightBytes} min={0.1} max={4} step={0.1} onChange={setCustomWeightBytes} help="Manual storage precision for weights." />
             )}
+            <KvQuantSelector
+              kType={kCacheType}
+              vType={vCacheType}
+              onChange={(nextK, nextV) => {
+                const oldRatio = kvQuantBytes[kCacheType] + kvQuantBytes[vCacheType];
+                const newRatio = kvQuantBytes[nextK] + kvQuantBytes[nextV];
+                setKCacheType(nextK);
+                setVCacheType(nextV);
+                if (oldRatio > 0) {
+                  setKvBytesPerToken(Math.max(1, Math.round(kvBytesPerToken * (newRatio / oldRatio))));
+                }
+              }}
+            />
             <KvBytesField value={kvBytesPerToken} onChange={setKvBytesPerToken} />
             <NumberField
               label="Pipeline stages"
@@ -1386,6 +1443,57 @@ function KvBytesField({ value, onChange }: { value: number; onChange: (value: nu
 
 function FieldHint({ children }: { children: React.ReactNode }) {
   return <p className="field-hint">{children}</p>;
+}
+
+function KvQuantSelector({
+  kType,
+  vType,
+  onChange,
+}: {
+  kType: KvQuantType;
+  vType: KvQuantType;
+  onChange: (kType: KvQuantType, vType: KvQuantType) => void;
+}) {
+  const ratio = (kvQuantBytes[kType] + kvQuantBytes[vType]) / (2 * kvQuantBytes.f16);
+  return (
+    <div className="field">
+      <label>KV cache quantization</label>
+      <FieldHint>
+        K and V cache types as exposed by llama.cpp / LM Studio. Picking
+        narrower quants shrinks the per-token KV footprint — the slider
+        below updates automatically. Some models lose quality at Q4 KV;
+        treat this as a memory experiment, not a free win.
+      </FieldHint>
+      <div className="kv-quant-row">
+        <label className="kv-quant-cell">
+          <span>K cache</span>
+          <select value={kType} onChange={(event) => onChange(event.target.value as KvQuantType, vType)}>
+            {kvQuantOrder.map((type) => (
+              <option key={type} value={type}>
+                {kvQuantLabels[type]} ({kvQuantBytes[type]} B/elem)
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="kv-quant-cell">
+          <span>V cache</span>
+          <select value={vType} onChange={(event) => onChange(kType, event.target.value as KvQuantType)}>
+            {kvQuantOrder.map((type) => (
+              <option key={type} value={type}>
+                {kvQuantLabels[type]} ({kvQuantBytes[type]} B/elem)
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <small>
+        KV bytes/token multiplier: <strong>{ratio.toFixed(2)}×</strong> the F16/F16 baseline.
+        {kType !== "f16" || vType !== "f16"
+          ? " Requires Flash Attention in llama.cpp/LM Studio."
+          : ""}
+      </small>
+    </div>
+  );
 }
 
 function PrecisionExplainer({
