@@ -127,6 +127,33 @@ const hardwareCategoryLabel: Record<HardwareCategory, string> = {
   "apple-silicon": "Apple Silicon (MacBook Pro / Mac mini)",
 };
 
+// Persists a single piece of state to localStorage under the given key. The
+// useState initializer reads synchronously, so there's no flash of default
+// values on mount. Failures (quota, private-browsing) are swallowed — the
+// app keeps working, the user just doesn't get persistence that session.
+const STORAGE_PREFIX = "dwarkoptimus.";
+
+function useLocalStorageState<T>(key: string, defaultValue: T): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const fullKey = STORAGE_PREFIX + key;
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const raw = window.localStorage.getItem(fullKey);
+      if (raw === null) return defaultValue;
+      return JSON.parse(raw) as T;
+    } catch {
+      return defaultValue;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(fullKey, JSON.stringify(value));
+    } catch {
+      // ignore — storage may be full or disabled
+    }
+  }, [fullKey, value]);
+  return [value, setValue];
+}
+
 function groupHardwareByCategory(presets: HardwarePreset[]): Array<{ category: HardwareCategory; items: HardwarePreset[] }> {
   const buckets = new Map<HardwareCategory, HardwarePreset[]>();
   for (const preset of presets) {
@@ -141,33 +168,33 @@ function groupHardwareByCategory(presets: HardwarePreset[]): Array<{ category: H
 
 function App() {
   const defaultHardwareIds = ["dell-b300-8gpu", "h200-pool-16gpu", "h200-server-4gpu"];
-  const [activeTab, setActiveTab] = useState<AppTab>("planner");
-  const [hardwareId, setHardwareId] = useState("dell-b300-8gpu");
-  const [enabledHardwareIds, setEnabledHardwareIds] = useState<string[]>(defaultHardwareIds);
-  const [modelId, setModelId] = useState("qwen3-coder-next");
-  const [precision, setPrecision] = useState<PrecisionMode>("fp4");
-  const [contextTokens, setContextTokens] = useState(modelPresets[0].contextTokens);
-  const [batchSize, setBatchSize] = useState(defaultServingBatch);
-  const [customWeightBytes, setCustomWeightBytes] = useState(0.5);
-  const [kvBytesPerToken, setKvBytesPerToken] = useState(modelPresets[0].kvBytesPerToken);
+  const [activeTab, setActiveTab] = useLocalStorageState<AppTab>("activeTab", "planner");
+  const [hardwareId, setHardwareId] = useLocalStorageState("hardwareId", "dell-b300-8gpu");
+  const [enabledHardwareIds, setEnabledHardwareIds] = useLocalStorageState<string[]>("enabledHardwareIds", defaultHardwareIds);
+  const [modelId, setModelId] = useLocalStorageState("modelId", "qwen3-coder-next");
+  const [precision, setPrecision] = useLocalStorageState<PrecisionMode>("precision", "fp4");
+  const [contextTokens, setContextTokens] = useLocalStorageState("contextTokens", modelPresets[0].contextTokens);
+  const [batchSize, setBatchSize] = useLocalStorageState("batchSize", defaultServingBatch);
+  const [customWeightBytes, setCustomWeightBytes] = useLocalStorageState("customWeightBytes", 0.5);
+  const [kvBytesPerToken, setKvBytesPerToken] = useLocalStorageState("kvBytesPerToken", modelPresets[0].kvBytesPerToken);
   // K and V cache quantization (matches LM Studio / llama.cpp). Both default
   // to F16 — that's the baseline every model preset's kvBytesPerToken assumes.
-  const [kCacheType, setKCacheType] = useState<KvQuantType>("f16");
-  const [vCacheType, setVCacheType] = useState<KvQuantType>("f16");
-  const [tokensPerSecond, setTokensPerSecond] = useState(0);
-  const [deploymentDays, setDeploymentDays] = useState(60);
+  const [kCacheType, setKCacheType] = useLocalStorageState<KvQuantType>("kCacheType", "f16");
+  const [vCacheType, setVCacheType] = useLocalStorageState<KvQuantType>("vCacheType", "f16");
+  const [tokensPerSecond, setTokensPerSecond] = useLocalStorageState("tokensPerSecond", 0);
+  const [deploymentDays, setDeploymentDays] = useLocalStorageState("deploymentDays", 60);
   const [hfPresets, setHfPresets] = useState<ModelPreset[]>(() => loadCachedHfPresets());
   const [optimizeNotes, setOptimizeNotes] = useState<string[] | null>(null);
   const allModelPresets = useMemo<ModelPreset[]>(() => [...modelPresets, ...hfPresets], [hfPresets]);
-  const [pipelineStages, setPipelineStages] = useState(1);
-  const [expertParallelism, setExpertParallelism] = useState(8);
-  const [safetyMargin, setSafetyMargin] = useState(0.8);
+  const [pipelineStages, setPipelineStages] = useLocalStorageState("pipelineStages", 1);
+  const [expertParallelism, setExpertParallelism] = useLocalStorageState("expertParallelism", 8);
+  const [safetyMargin, setSafetyMargin] = useLocalStorageState("safetyMargin", 0.8);
   // Lifecycle (optional). All zero by default → the lifecycle panel stays
   // hidden until the operator opts in by entering pretrain or RL tokens.
-  const [pretrainTokens, setPretrainTokens] = useState(0);
-  const [rlTokens, setRlTokens] = useState(0);
-  const [rlInefficiency, setRlInefficiency] = useState(3);
-  const [inferenceInefficiency, setInferenceInefficiency] = useState(5);
+  const [pretrainTokens, setPretrainTokens] = useLocalStorageState("pretrainTokens", 0);
+  const [rlTokens, setRlTokens] = useLocalStorageState("rlTokens", 0);
+  const [rlInefficiency, setRlInefficiency] = useLocalStorageState("rlInefficiency", 3);
+  const [inferenceInefficiency, setInferenceInefficiency] = useLocalStorageState("inferenceInefficiency", 5);
 
   const visibleHardwarePresets = hardwarePresets.filter((item) => enabledHardwareIds.includes(item.id));
   const plannerHardwarePresets = visibleHardwarePresets.length > 0 ? visibleHardwarePresets : hardwarePresets;
