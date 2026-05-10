@@ -35,9 +35,6 @@ jobs:
       - name: Typecheck and build
         env:
           GITHUB_PAGES: "true"
-          # Optional analytics. Set as a repo secret (Settings → Secrets → Actions).
-          # If unset, no analytics tag is rendered in index.html.
-          VITE_GOATCOUNTER_CODE: ${{ secrets.VITE_GOATCOUNTER_CODE }}
         run: pnpm run build
 
       - name: Add SPA + no-Jekyll files
