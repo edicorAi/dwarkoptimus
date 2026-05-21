@@ -195,6 +195,10 @@ function App() {
   const [rlTokens, setRlTokens] = useLocalStorageState("rlTokens", 0);
   const [rlInefficiency, setRlInefficiency] = useLocalStorageState("rlInefficiency", 3);
   const [inferenceInefficiency, setInferenceInefficiency] = useLocalStorageState("inferenceInefficiency", 5);
+  // When on, batch auto-locks to min(maxFittingBatch, batchThreshold) — the
+  // largest size that fits HBM and still amortizes weights. Switching off
+  // restores the manual slider.
+  const [autoTuneBatch, setAutoTuneBatch] = useLocalStorageState("autoTuneBatch", true);
 
   const visibleHardwarePresets = hardwarePresets.filter((item) => enabledHardwareIds.includes(item.id));
   const plannerHardwarePresets = visibleHardwarePresets.length > 0 ? visibleHardwarePresets : hardwarePresets;
@@ -278,6 +282,32 @@ function App() {
   );
   const servingPlan = useMemo(() => createServingPlan(scenario, result), [scenario, result]);
 
+  // Auto-tune: pick the largest batch that fits HBM (`maxFittingBatch`) AND
+  // doesn't go above the weight-amortization knee (`batchThreshold`). Whichever
+  // is smaller wins — going past either is wasted (OOM vs. latency without
+  // extra throughput). Embedding/VLM workloads aren't decoder-shaped, so the
+  // lock is a no-op there.
+  const isDecoderModel =
+    model.architecture === "dense" || model.architecture === "moe" || model.architecture === "hybrid";
+  const optimalBatch = useMemo(() => {
+    if (!isDecoderModel) return batchSize;
+    const ceiling = Math.floor(result.maxFittingBatch);
+    if (!Number.isFinite(ceiling) || ceiling <= 0) return 1;
+    const knee = Math.max(1, Math.round(result.batchThreshold));
+    return Math.max(1, Math.min(ceiling, knee));
+  }, [isDecoderModel, batchSize, result.maxFittingBatch, result.batchThreshold]);
+  const optimalBatchBinding: "knee" | "hbm" | "infeasible" = useMemo(() => {
+    if (!isDecoderModel) return "knee";
+    const ceiling = Math.floor(result.maxFittingBatch);
+    if (!Number.isFinite(ceiling) || ceiling <= 0) return "infeasible";
+    const knee = Math.max(1, Math.round(result.batchThreshold));
+    return knee <= ceiling ? "knee" : "hbm";
+  }, [isDecoderModel, result.maxFittingBatch, result.batchThreshold]);
+  useEffect(() => {
+    if (!autoTuneBatch || !isDecoderModel) return;
+    if (optimalBatch !== batchSize) setBatchSize(optimalBatch);
+  }, [autoTuneBatch, isDecoderModel, optimalBatch, batchSize, setBatchSize]);
+
   function applyHardware(nextId: string) {
     const next = hardwarePresets.find((item) => item.id === nextId) ?? hardwarePresets[0];
     setHardwareId(next.id);
@@ -345,6 +375,7 @@ function App() {
     setExpertParallelism(out.overrides.expertParallelism);
     setPipelineStages(out.overrides.pipelineStages);
     setSafetyMargin(out.overrides.safetyMargin);
+    setAutoTuneBatch(true);
     setOptimizeNotes(out.rationale);
   }
 
@@ -523,6 +554,15 @@ function App() {
               onChange={setContextTokens}
               help="Prompt plus history length. Larger values increase KV cache pressure."
             />
+            <label className="auto-tune-toggle" title="When on, batch follows the largest size that fits HBM and stays at or under the break-even knee.">
+              <input
+                type="checkbox"
+                checked={autoTuneBatch}
+                onChange={(event) => setAutoTuneBatch(event.target.checked)}
+              />
+              <span>Auto-tune batch</span>
+              <small>Lock to whatever serves the most users at this context without wasting compute.</small>
+            </label>
             <NumberField
               label="Batch (concurrent sequences)"
               value={batchSize}
@@ -531,6 +571,14 @@ function App() {
               step={1}
               onChange={setBatchSize}
               help="How many users are decoded together in one step. This is the only concurrency knob — vLLM's --max-num-seqs comes from here."
+              disabled={autoTuneBatch && isDecoderModel}
+              lockedNote={
+                optimalBatchBinding === "infeasible"
+                  ? `Doesn't fit even at batch 1 — shorten context, drop precision, or pick larger hardware.`
+                  : optimalBatchBinding === "hbm"
+                    ? `Locked to ${optimalBatch.toLocaleString()} — HBM cap. More users want to fit but there's no room.`
+                    : `Locked to ${optimalBatch.toLocaleString()} — break-even knee. HBM still has room above this, but going higher wouldn't drop per-token cost.`
+              }
             />
 
             <SectionTitle title="More controls" />
@@ -672,6 +720,12 @@ function App() {
 
           <section className="content">
             <VerdictCard result={result} scenario={scenario} />
+            <HeadlineStats
+              result={result}
+              scenario={scenario}
+              autoTuneOn={autoTuneBatch && isDecoderModel}
+              binding={optimalBatchBinding}
+            />
             <PlanningPanel
               plan={servingPlan}
               onApply={() => {
@@ -1413,6 +1467,8 @@ function NumberField({
   max,
   step,
   onChange,
+  disabled = false,
+  lockedNote,
 }: {
   label: string;
   help: string;
@@ -1421,17 +1477,20 @@ function NumberField({
   max: number;
   step: number;
   onChange: (value: number) => void;
+  disabled?: boolean;
+  lockedNote?: string;
 }) {
   const safeMax = Math.max(min, max);
   const boundedValue = clampNumber(value, min, safeMax);
   const update = (nextValue: number) => onChange(clampNumber(nextValue, min, safeMax));
 
   return (
-    <div className="field">
+    <div className={`field${disabled ? " field-locked" : ""}`}>
       <label>{label}</label>
       <FieldHint>{help}</FieldHint>
-      <input type="number" value={boundedValue} min={min} max={safeMax} step={step} onChange={(event) => update(Number(event.target.value))} />
-      <input type="range" value={boundedValue} min={min} max={safeMax} step={step} onChange={(event) => update(Number(event.target.value))} />
+      <input type="number" value={boundedValue} min={min} max={safeMax} step={step} disabled={disabled} onChange={(event) => update(Number(event.target.value))} />
+      <input type="range" value={boundedValue} min={min} max={safeMax} step={step} disabled={disabled} onChange={(event) => update(Number(event.target.value))} />
+      {disabled && lockedNote && <small className="locked-note">🔒 {lockedNote}</small>}
     </div>
   );
 }
@@ -1776,6 +1835,56 @@ function VerdictCard({ result, scenario }: { result: ReturnType<typeof calculate
         <Fact label="Hardware" value={scenario.hardware.label} />
         <Fact label="Bottleneck" value={result.bottleneck.replace("-", " ")} />
       </div>
+    </article>
+  );
+}
+
+function HeadlineStats({
+  result,
+  scenario,
+  autoTuneOn,
+  binding,
+}: {
+  result: ReturnType<typeof calculateScenario>;
+  scenario: ScenarioInputs;
+  autoTuneOn: boolean;
+  binding: "knee" | "hbm" | "infeasible";
+}) {
+  const users = Number.isFinite(result.maxFittingBatch) && result.maxFittingBatch > 0
+    ? Math.max(1, Math.min(scenario.batchSize, Math.floor(result.maxFittingBatch)))
+    : Number.NaN;
+  const tps = Number.isFinite(result.derivedTokensPerSecond) ? result.derivedTokensPerSecond : Number.NaN;
+  const ctxLabel = `${formatCompact(scenario.contextTokens)} tok context · ${scenario.hardware.label}`;
+  const bindingNote =
+    binding === "infeasible"
+      ? "Doesn't fit at this context — shorten context, drop precision, or pick larger hardware."
+      : binding === "hbm"
+        ? "Limited by HBM — more users want to fit, but there's no room."
+        : "Limited by the break-even knee — adding users wouldn't lower per-token cost.";
+  return (
+    <article className={`panel headline-stats ${binding}`}>
+      <div className="panel-heading">
+        <div>
+          <h2>At this context</h2>
+          <span>{ctxLabel}</span>
+        </div>
+        <span className={`headline-mode ${autoTuneOn ? "on" : "off"}`}>
+          {autoTuneOn ? "🔒 Auto-tuned" : "Manual batch"}
+        </span>
+      </div>
+      <div className="headline-grid">
+        <div>
+          <span>Concurrent users</span>
+          <strong>{Number.isFinite(users) ? formatCompact(users) : "--"}</strong>
+          <small>in-flight sequences this configuration can serve at once</small>
+        </div>
+        <div>
+          <span>Decode throughput</span>
+          <strong>{Number.isFinite(tps) ? formatCompact(tps, " tok/s") : "--"}</strong>
+          <small>pool tokens/second across all users (batch ÷ step)</small>
+        </div>
+      </div>
+      {autoTuneOn && <p className="headline-binding">{bindingNote}</p>}
     </article>
   );
 }
