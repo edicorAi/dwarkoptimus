@@ -111,6 +111,7 @@ function defaultPrecisionForHardware(hardware: HardwarePreset): PrecisionMode {
 // Planner Hardware <select> (via <optgroup>) and the Settings inventory.
 const hardwareCategoryOrder: HardwareCategory[] = [
   "nvidia-blackwell",
+  "nvidia-dgx-desktop",
   "nvidia-hopper",
   "nvidia-ampere",
   "nvidia-consumer",
@@ -120,6 +121,7 @@ const hardwareCategoryOrder: HardwareCategory[] = [
 
 const hardwareCategoryLabel: Record<HardwareCategory, string> = {
   "nvidia-blackwell": "NVIDIA Blackwell (B-series)",
+  "nvidia-dgx-desktop": "NVIDIA DGX desktop (DGX Spark)",
   "nvidia-hopper": "NVIDIA Hopper (H-series)",
   "nvidia-ampere": "NVIDIA Ampere (A-series)",
   "nvidia-consumer": "NVIDIA RTX / consumer & workstation",
@@ -1179,21 +1181,28 @@ utilization = required_per_gpu / available_per_gpu`}</pre>
       <DocSection id="hf-import" title="Hugging Face import">
         <p>
           The search box under the Model dropdown queries{" "}
-          <code>huggingface.co/api/models</code>. Each result shows downloads, likes, and a 🔒
-          gated badge if the repo requires license acceptance. Clicking <strong>Import</strong>:
+          <code>huggingface.co/api/models</code> across both the{" "}
+          <code>text-generation</code> and <code>image-text-to-text</code> pipelines (current
+          flagships like Qwen3.5, MiniMax M3, and Kimi K2.7 are natively multimodal and only
+          carry the latter tag), merged and ranked by downloads. Each result shows downloads,
+          likes, and a 🔒 gated badge if the repo requires license acceptance. Clicking{" "}
+          <strong>Import</strong>:
         </p>
         <ol>
           <li>
             Fetches <code>config.json</code> from{" "}
-            <code>huggingface.co/&lt;repo&gt;/resolve/main/config.json</code>.
+            <code>huggingface.co/&lt;repo&gt;/resolve/main/config.json</code>, unwrapping the
+            nested <code>text_config</code> that multimodal repos use.
           </li>
           <li>
             Reads <code>safetensors.total</code> (when published) for an authoritative param
             count, otherwise estimates from <code>hidden_size × layers × intermediate_size</code>.
           </li>
           <li>
-            Computes KV bytes/token <em>exactly</em> from{" "}
-            <code>2 × layers × kv_heads × head_dim × dtype_bytes</code> — no estimation.
+            Computes KV bytes/token from the attention shape: GQA models use{" "}
+            <code>2 × layers × kv_heads × head_dim × dtype_bytes</code>; MLA models
+            (DeepSeek, GLM, Kimi) use the compressed latent{" "}
+            <code>layers × (kv_lora_rank + rope_dim) × dtype_bytes</code> instead.
           </li>
           <li>
             Saves the derived preset to <code>localStorage</code> (key prefix{" "}

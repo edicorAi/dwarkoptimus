@@ -85,6 +85,42 @@ export const hardwarePresets: HardwarePreset[] = [
     notes: "Single B300-style reference derived from GB300 NVL72 rack totals.",
     sources: ["NVIDIA GB300 NVL72 public specs"],
   },
+  // -------------------------------------------------------------------------
+  // NVIDIA DGX desktop (Grace Blackwell). Like Apple Silicon, memory is
+  // unified and shared with the OS — the 0.8 safety margin covers that. The
+  // GB10's "1 petaFLOP FP4" headline is the 2:1-sparsity number; flopsPerByte
+  // below uses the ~500 TFLOPS dense figure over 273 GB/s LPDDR5x.
+  // -------------------------------------------------------------------------
+  {
+    id: "dgx-spark",
+    label: "NVIDIA DGX Spark (GB10, 128 GB)",
+    category: "nvidia-dgx-desktop",
+    gpuCount: 1,
+    memoryBytesPerGpu: 128e9,
+    memoryBandwidthBytesPerSecondPerGpu: 273e9,
+    flopsPerByte: 1832,
+    nativeComputeBytes: 0.5,
+    interconnect: "single-gpu",
+    confidence: "source-backed",
+    notes:
+      "GB10 Grace Blackwell desktop: 128 GB unified LPDDR5x at 273 GB/s, ~500 TFLOPS dense FP4 (1 PFLOP sparse marketing). Huge memory for the price, but Mac-class bandwidth — decode is HBM-bound long before compute; NVFP4 quants are the intended serving path.",
+    sources: ["NVIDIA DGX Spark product page", "NVIDIA GB10 public specs"],
+  },
+  {
+    id: "dgx-spark-2x",
+    label: "NVIDIA DGX Spark pair (2x GB10, 256 GB)",
+    category: "nvidia-dgx-desktop",
+    gpuCount: 2,
+    memoryBytesPerGpu: 128e9,
+    memoryBandwidthBytesPerSecondPerGpu: 273e9,
+    flopsPerByte: 1832,
+    nativeComputeBytes: 0.5,
+    interconnect: "multi-node-network",
+    confidence: "source-backed",
+    notes:
+      "Two DGX Sparks linked over their ConnectX-7 200 GbE ports — NVIDIA's supported path to 256 GB for ~400B-class FP4 models. 200 GbE is a fraction of NVLink, so treat this as two networked nodes, not one scale-up domain.",
+    sources: ["NVIDIA DGX Spark product page", "NVIDIA ConnectX-7 specs"],
+  },
   {
     id: "h200-pool-16gpu",
     label: "NVIDIA H200 pool (4 servers, 16x GPU)",

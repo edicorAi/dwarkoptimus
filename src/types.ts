@@ -5,6 +5,7 @@ export type PrecisionMode = "bf16" | "fp8" | "fp4" | "custom";
 export type Verdict = "fits" | "tight" | "does-not-fit" | "not-applicable";
 export type HardwareCategory =
   | "nvidia-blackwell"
+  | "nvidia-dgx-desktop"
   | "nvidia-hopper"
   | "nvidia-ampere"
   | "nvidia-consumer"
