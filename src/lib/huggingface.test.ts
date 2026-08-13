@@ -5,6 +5,8 @@ import {
   dtypeToBytes,
   estimateActiveParams,
   estimateTotalParams,
+  normalizeHfConfig,
+  quantBytesPerParam,
   type HfModelConfig,
 } from "./huggingface";
 
@@ -43,6 +45,71 @@ const mixtralConfig: HfModelConfig = {
   moe_intermediate_size: 14336,
 };
 
+// GLM-5.2-style MLA config: carries BOTH kv_lora_rank and full GQA head fields.
+// The MLA branch must win — the GQA formula would be ~40× too high.
+const glmMlaConfig: HfModelConfig = {
+  model_type: "glm_moe_dsa",
+  num_hidden_layers: 78,
+  hidden_size: 6144,
+  num_attention_heads: 64,
+  num_key_value_heads: 64,
+  head_dim: 192,
+  kv_lora_rank: 512,
+  qk_rope_head_dim: 64,
+  n_routed_experts: 256,
+  num_experts_per_tok: 8,
+  moe_intermediate_size: 2048,
+  intermediate_size: 12288,
+  max_position_embeddings: 1048576,
+  torch_dtype: "bfloat16",
+  index_topk: 2048,
+};
+
+// DeepSeek-V4-style MQA-absorbed MLA: one KV head whose head_dim is the latent.
+const deepseekV4Config: HfModelConfig = {
+  model_type: "deepseek_v4",
+  num_hidden_layers: 61,
+  hidden_size: 7168,
+  num_attention_heads: 128,
+  num_key_value_heads: 1,
+  head_dim: 512,
+  qk_rope_head_dim: 64,
+  n_routed_experts: 384,
+  num_experts_per_tok: 6,
+  max_position_embeddings: 1048576,
+  torch_dtype: "bfloat16",
+};
+
+// MiniMax-M3-style multimodal wrapper: decoder nested under text_config.
+const minimaxWrapperConfig: HfModelConfig = {
+  model_type: "minimax_m3_vl",
+  torch_dtype: "bfloat16",
+  text_config: {
+    hidden_size: 6144,
+    num_hidden_layers: 60,
+    num_attention_heads: 64,
+    num_key_value_heads: 4,
+    head_dim: 128,
+    max_position_embeddings: 1048576,
+    num_local_experts: 128,
+    num_experts_per_tok: 4,
+  },
+};
+
+describe("normalizeHfConfig", () => {
+  it("flattens text_config while keeping top-level-only fields", () => {
+    const flat = normalizeHfConfig(minimaxWrapperConfig);
+    expect(flat.num_hidden_layers).toBe(60);
+    expect(flat.num_key_value_heads).toBe(4);
+    expect(flat.max_position_embeddings).toBe(1048576);
+    expect(flat.torch_dtype).toBe("bfloat16");
+  });
+
+  it("returns the config unchanged when nothing is nested", () => {
+    expect(normalizeHfConfig(llama3Config)).toBe(llama3Config);
+  });
+});
+
 describe("dtypeToBytes", () => {
   it("maps common dtypes correctly", () => {
     expect(dtypeToBytes("bfloat16")).toBe(2);
@@ -68,6 +135,33 @@ describe("deriveKvBytesPerToken", () => {
 
   it("returns 0 with an incomplete config", () => {
     expect(deriveKvBytesPerToken({})).toBe(0);
+  });
+
+  it("prefers the MLA latent over GQA heads when kv_lora_rank is present", () => {
+    // 78 × (512 + 64) × 2 = 89,856 — NOT 2 × 78 × 64 × 192 × 2 ≈ 3.8 MB
+    expect(deriveKvBytesPerToken(glmMlaConfig)).toBe(89856);
+  });
+
+  it("handles DeepSeek-style MQA-absorbed MLA (1 KV head = latent)", () => {
+    // 61 × (512 + 64) × 2 = 70,272
+    expect(deriveKvBytesPerToken(deepseekV4Config)).toBe(70272);
+  });
+
+  it("derives GQA KV from a flattened multimodal wrapper", () => {
+    // 2 × 60 × 4 × 128 × 2 = 122,880
+    expect(deriveKvBytesPerToken(normalizeHfConfig(minimaxWrapperConfig))).toBe(122880);
+  });
+});
+
+describe("quantBytesPerParam", () => {
+  it("reads 4-bit and 8-bit quantization configs", () => {
+    expect(quantBytesPerParam({ quantization_config: { quant_algo: "NVFP4" } })).toBe(0.5);
+    expect(quantBytesPerParam({ quantization_config: { quant_method: "awq", bits: 4 } })).toBe(0.5);
+    expect(quantBytesPerParam({ quantization_config: { quant_method: "fp8" } })).toBe(1);
+  });
+
+  it("returns undefined without a quantization config", () => {
+    expect(quantBytesPerParam(llama3Config)).toBeUndefined();
   });
 });
 
@@ -125,5 +219,23 @@ describe("derivePresetFromHfConfig", () => {
     const preset = derivePresetFromHfConfig("meta-llama/Meta-Llama-3-8B", llama3Config, 8.03e9);
     expect(preset.totalParams).toBe(8.03e9);
     expect(preset.confidence).toBe("source-backed");
+  });
+
+  it("imports an n_routed_experts MoE with MLA KV and marks DSA models estimated", () => {
+    const preset = derivePresetFromHfConfig("zai-org/GLM-5.2", glmMlaConfig, 753e9);
+    expect(preset.architecture).toBe("moe");
+    expect(preset.activatedExperts).toBe(8);
+    expect(preset.kvBytesPerToken).toBe(89856);
+    // index_topk present → sparse-attention indexer cache not counted
+    expect(preset.kvConfidence).toBe("estimated");
+    expect(preset.activeParams).toBeLessThan(preset.totalParams);
+  });
+
+  it("imports a flattened multimodal wrapper as a decoder MoE (not vlm)", () => {
+    const preset = derivePresetFromHfConfig("MiniMaxAI/MiniMax-M3", normalizeHfConfig(minimaxWrapperConfig), 427e9);
+    expect(preset.architecture).toBe("moe");
+    expect(preset.contextTokens).toBe(1048576);
+    expect(preset.kvBytesPerToken).toBe(122880);
+    expect(preset.kvConfidence).toBe("source-backed");
   });
 });
