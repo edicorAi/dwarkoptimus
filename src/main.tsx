@@ -110,23 +110,33 @@ function defaultPrecisionForHardware(hardware: HardwarePreset): PrecisionMode {
 // Display order + label for hardware categories. Used to group both the
 // Planner Hardware <select> (via <optgroup>) and the Settings inventory.
 const hardwareCategoryOrder: HardwareCategory[] = [
+  "nvidia-rubin",
   "nvidia-blackwell",
   "nvidia-dgx-desktop",
   "nvidia-hopper",
   "nvidia-ampere",
   "nvidia-consumer",
+  "nvidia-edge",
   "nvidia-legacy",
+  "amd-instinct",
+  "amd-apu",
+  "intel-gaudi",
   "apple-silicon",
 ];
 
 const hardwareCategoryLabel: Record<HardwareCategory, string> = {
+  "nvidia-rubin": "NVIDIA Rubin (R-series, preview)",
   "nvidia-blackwell": "NVIDIA Blackwell (B-series)",
-  "nvidia-dgx-desktop": "NVIDIA DGX desktop (DGX Spark)",
+  "nvidia-dgx-desktop": "NVIDIA DGX desktop (Spark / Station)",
   "nvidia-hopper": "NVIDIA Hopper (H-series)",
   "nvidia-ampere": "NVIDIA Ampere (A-series)",
   "nvidia-consumer": "NVIDIA RTX / consumer & workstation",
+  "nvidia-edge": "NVIDIA Jetson (edge)",
   "nvidia-legacy": "NVIDIA legacy (Volta)",
-  "apple-silicon": "Apple Silicon (MacBook Pro / Mac mini)",
+  "amd-instinct": "AMD Instinct (MI-series)",
+  "amd-apu": "AMD Ryzen AI Max (Strix Halo)",
+  "intel-gaudi": "Intel Gaudi",
+  "apple-silicon": "Apple Silicon (MacBook Pro / Mac mini / Mac Studio)",
 };
 
 // Persists a single piece of state to localStorage under the given key. The

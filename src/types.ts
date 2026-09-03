@@ -4,12 +4,17 @@ export type Interconnect = "single-node-nvlink" | "multi-node-network" | "rack-n
 export type PrecisionMode = "bf16" | "fp8" | "fp4" | "custom";
 export type Verdict = "fits" | "tight" | "does-not-fit" | "not-applicable";
 export type HardwareCategory =
+  | "nvidia-rubin"
   | "nvidia-blackwell"
   | "nvidia-dgx-desktop"
   | "nvidia-hopper"
   | "nvidia-ampere"
   | "nvidia-consumer"
+  | "nvidia-edge"
   | "nvidia-legacy"
+  | "amd-instinct"
+  | "amd-apu"
+  | "intel-gaudi"
   | "apple-silicon";
 
 export type HardwarePreset = {

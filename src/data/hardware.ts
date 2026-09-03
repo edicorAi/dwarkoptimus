@@ -14,6 +14,27 @@ import type { HardwarePreset } from "../types";
 //   in practice — which the bottleneck classifier already says.
 
 export const hardwarePresets: HardwarePreset[] = [
+  // -------------------------------------------------------------------------
+  // NVIDIA Rubin (in production 2026, deployments ramping). Per-package specs
+  // from NVIDIA's public roadmap: 288 GB HBM4 at ~13 TB/s, 50 PFLOPS dense
+  // NVFP4 (3.3x the 15 PF of GB300). Treat as preview numbers until
+  // production datasheets land.
+  // -------------------------------------------------------------------------
+  {
+    id: "vera-rubin-1gpu",
+    label: "NVIDIA Rubin (1x package, preview)",
+    category: "nvidia-rubin",
+    gpuCount: 1,
+    memoryBytesPerGpu: 288e9,
+    memoryBandwidthBytesPerSecondPerGpu: 13e12,
+    flopsPerByte: 3846,
+    nativeComputeBytes: 0.5,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "Single Rubin package from the Vera Rubin NVL144 platform (each package is 2 reticle dies, counted as one GPU here). 288 GB HBM4 at ~13 TB/s, ~50 PFLOPS dense NVFP4. Roadmap-level numbers — revisit when production datasheets are public.",
+    sources: ["NVIDIA Vera Rubin platform announcements (GTC 2025/2026)"],
+  },
   {
     id: "dell-b300-8gpu",
     label: "NVIDIA B300 server (8x GPU)",
@@ -122,6 +143,21 @@ export const hardwarePresets: HardwarePreset[] = [
     sources: ["NVIDIA DGX Spark product page", "NVIDIA ConnectX-7 specs"],
   },
   {
+    id: "dgx-station-gb300",
+    label: "NVIDIA DGX Station (GB300, 252 GB HBM3e)",
+    category: "nvidia-dgx-desktop",
+    gpuCount: 1,
+    memoryBytesPerGpu: 252e9,
+    memoryBandwidthBytesPerSecondPerGpu: 7.1e12,
+    flopsPerByte: 1408,
+    nativeComputeBytes: 0.5,
+    interconnect: "single-gpu",
+    confidence: "source-backed",
+    notes:
+      "Grace Blackwell Ultra desktop. Shipping systems carry 252 GB HBM3e at 7.1 TB/s (binned-down from the announced 288 GB / 8 TB/s B300 spec) plus 496 GB coherent LPDDR5X at ~396 GB/s on the Grace side — only the HBM pool is modeled here. flopsPerByte assumes ~10 PFLOPS dense FP4 (20 PF sparse marketing).",
+    sources: ["NVIDIA DGX Station product page", "ServeTheHome DGX Station GB300 coverage"],
+  },
+  {
     id: "h200-pool-16gpu",
     label: "NVIDIA H200 pool (4 servers, 16x GPU)",
     category: "nvidia-hopper",
@@ -207,6 +243,51 @@ export const hardwarePresets: HardwarePreset[] = [
     sources: ["NVIDIA H100 public specs"],
   },
   {
+    id: "h100-pcie-1gpu",
+    label: "NVIDIA H100 PCIe (1x GPU)",
+    category: "nvidia-hopper",
+    gpuCount: 1,
+    memoryBytesPerGpu: 80e9,
+    memoryBandwidthBytesPerSecondPerGpu: 2e12,
+    flopsPerByte: 757,
+    nativeComputeBytes: 1,
+    interconnect: "single-gpu",
+    confidence: "source-backed",
+    notes:
+      "What most clouds actually rent as \"an H100\": HBM2e at 2.0 TB/s (vs 3.35 on SXM) and lower clocks. Same 80 GB, meaningfully slower decode.",
+    sources: ["NVIDIA H100 PCIe datasheet"],
+  },
+  {
+    id: "gh200-141gb",
+    label: "NVIDIA GH200 Grace Hopper (141 GB HBM3e)",
+    category: "nvidia-hopper",
+    gpuCount: 1,
+    memoryBytesPerGpu: 141e9,
+    memoryBandwidthBytesPerSecondPerGpu: 4.9e12,
+    flopsPerByte: 404,
+    nativeComputeBytes: 1,
+    interconnect: "single-gpu",
+    confidence: "source-backed",
+    notes:
+      "Grace Hopper superchip, HBM3e variant. The 480 GB LPDDR5X on the Grace side is coherent but ~10x slower than HBM and is not modeled here — treat this as a slightly faster H200. A 96 GB HBM3 variant also exists.",
+    sources: ["NVIDIA GH200 datasheet"],
+  },
+  {
+    id: "h20-96gb",
+    label: "NVIDIA H20 (96 GB, 1x GPU)",
+    category: "nvidia-hopper",
+    gpuCount: 1,
+    memoryBytesPerGpu: 96e9,
+    memoryBandwidthBytesPerSecondPerGpu: 4e12,
+    flopsPerByte: 74,
+    nativeComputeBytes: 1,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "Export-compliant Hopper: H200-class memory (96 GB at 4 TB/s) with ~15% of the compute (~296 TFLOPS dense FP8). The extreme bandwidth-rich/compute-poor point — decode throughput is fine, prefill and large-batch serving hit the compute roof early. An HBM3e variant (141 GB, 4.8 TB/s) also exists.",
+    sources: ["NVIDIA H20 reported specs (no public datasheet)"],
+  },
+  {
     id: "a100-sxm-8gpu",
     label: "NVIDIA A100 SXM server (8x GPU)",
     category: "nvidia-ampere",
@@ -233,6 +314,36 @@ export const hardwarePresets: HardwarePreset[] = [
     confidence: "source-backed",
     notes: "Single A100 80GB reference preset.",
     sources: ["NVIDIA A100 public specs"],
+  },
+  {
+    id: "a100-sxm-40gb-1gpu",
+    label: "NVIDIA A100 SXM 40GB (1x GPU)",
+    category: "nvidia-ampere",
+    gpuCount: 1,
+    memoryBytesPerGpu: 40e9,
+    memoryBandwidthBytesPerSecondPerGpu: 1.555e12,
+    flopsPerByte: 201,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "source-backed",
+    notes:
+      "Original A100 SKU: half the HBM of the 80 GB refresh at 1.555 TB/s. Still everywhere on cheap cloud spot markets; fine for ≤13B bf16 or ~30B int4.",
+    sources: ["NVIDIA A100 40GB datasheet"],
+  },
+  {
+    id: "rtx-pro-6000-blackwell-1gpu",
+    label: "NVIDIA RTX PRO 6000 Blackwell (1x GPU)",
+    category: "nvidia-consumer",
+    gpuCount: 1,
+    memoryBytesPerGpu: 96e9,
+    memoryBandwidthBytesPerSecondPerGpu: 1792e9,
+    flopsPerByte: 558,
+    nativeComputeBytes: 0.5,
+    interconnect: "single-gpu",
+    confidence: "source-backed",
+    notes:
+      "Blackwell workstation flagship: 96 GB ECC GDDR7 at 1.79 TB/s with FP4 tensor cores (~1 PFLOPS dense; the 4000-TOPS headline is sparse marketing). The most memory you can get on a single PCIe card — the new prosumer serving default for 70B-class models.",
+    sources: ["NVIDIA RTX PRO 6000 Blackwell product page"],
   },
   {
     id: "l40s-1gpu",
@@ -276,6 +387,21 @@ export const hardwarePresets: HardwarePreset[] = [
     confidence: "source-backed",
     notes:
       "Blackwell consumer. 32 GB GDDR7 at ~1.79 TB/s. FP4 tensor cores make this surprisingly competent for quantized local serving.",
+    sources: ["NVIDIA GeForce RTX 50-series spec page"],
+  },
+  {
+    id: "rtx-5080-1gpu",
+    label: "NVIDIA GeForce RTX 5080 (1x GPU)",
+    category: "nvidia-consumer",
+    gpuCount: 1,
+    memoryBytesPerGpu: 16e9,
+    memoryBandwidthBytesPerSecondPerGpu: 960e9,
+    flopsPerByte: 469,
+    nativeComputeBytes: 0.5,
+    interconnect: "single-gpu",
+    confidence: "source-backed",
+    notes:
+      "Blackwell consumer, one tier down. 16 GB GDDR7 at 960 GB/s — plenty of compute and bandwidth, but 16 GB caps you at ~13B fp8 / ~30B fp4 with short context.",
     sources: ["NVIDIA GeForce RTX 50-series spec page"],
   },
   {
@@ -324,6 +450,21 @@ export const hardwarePresets: HardwarePreset[] = [
     sources: ["NVIDIA GeForce RTX 3090 spec page"],
   },
   {
+    id: "jetson-agx-thor",
+    label: "NVIDIA Jetson AGX Thor (128 GB)",
+    category: "nvidia-edge",
+    gpuCount: 1,
+    memoryBytesPerGpu: 128e9,
+    memoryBandwidthBytesPerSecondPerGpu: 273e9,
+    flopsPerByte: 3791,
+    nativeComputeBytes: 0.5,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "Blackwell edge/robotics module: 128 GB unified LPDDR5X at 273 GB/s — same memory shape as DGX Spark. flopsPerByte takes NVIDIA's 2070-TFLOPS-FP4 headline as sparse and halves it; the exact figure barely matters since decode is bandwidth-bound at this ratio anyway.",
+    sources: ["NVIDIA Jetson AGX Thor product page"],
+  },
+  {
     id: "v100-sxm2-32gb-1gpu",
     label: "NVIDIA Tesla V100 SXM2 32GB (1x GPU)",
     category: "nvidia-legacy",
@@ -355,7 +496,132 @@ export const hardwarePresets: HardwarePreset[] = [
   },
 
   // -------------------------------------------------------------------------
-  // Apple Silicon (MacBook Pro + Mac mini, M1 → M4 generations)
+  // AMD Instinct (CDNA). vLLM supports these first-class via ROCm. Standard
+  // shape is an 8-GPU OAM node with full-mesh Infinity Fabric — modeled with
+  // the same "single-node scale-up" interconnect bucket as NVLink servers.
+  // flopsPerByte uses AMD's dense (non-sparse) figures: FP8 for CDNA3
+  // (MI300X/MI325X, nativeComputeBytes 1), FP4 for CDNA4/5 (MI355X/MI455X,
+  // nativeComputeBytes 0.5).
+  // -------------------------------------------------------------------------
+  {
+    id: "mi300x-8gpu",
+    label: "AMD Instinct MI300X node (8x GPU)",
+    category: "amd-instinct",
+    gpuCount: 8,
+    memoryBytesPerGpu: 192e9,
+    memoryBandwidthBytesPerSecondPerGpu: 5.3e12,
+    flopsPerByte: 247,
+    nativeComputeBytes: 1,
+    interconnect: "single-node-nvlink",
+    confidence: "source-backed",
+    notes:
+      "The standard non-NVIDIA serving node: 8x CDNA3 with 192 GB HBM3 at 5.3 TB/s each (1.5 TB total). More memory and bandwidth than H200 per GPU; ~1307 TFLOPS dense FP8 each.",
+    sources: ["AMD Instinct MI300X datasheet"],
+  },
+  {
+    id: "mi300x-1gpu",
+    label: "AMD Instinct MI300X (1x GPU)",
+    category: "amd-instinct",
+    gpuCount: 1,
+    memoryBytesPerGpu: 192e9,
+    memoryBandwidthBytesPerSecondPerGpu: 5.3e12,
+    flopsPerByte: 247,
+    nativeComputeBytes: 1,
+    interconnect: "single-gpu",
+    confidence: "source-backed",
+    notes:
+      "Single MI300X as rented on GPU clouds. 192 GB on one device fits 70B-class models in fp8 without tensor parallelism.",
+    sources: ["AMD Instinct MI300X datasheet"],
+  },
+  {
+    id: "mi325x-8gpu",
+    label: "AMD Instinct MI325X node (8x GPU)",
+    category: "amd-instinct",
+    gpuCount: 8,
+    memoryBytesPerGpu: 256e9,
+    memoryBandwidthBytesPerSecondPerGpu: 6e12,
+    flopsPerByte: 218,
+    nativeComputeBytes: 1,
+    interconnect: "single-node-nvlink",
+    confidence: "source-backed",
+    notes:
+      "CDNA3 memory refresh: same ~1307 TFLOPS dense FP8 as MI300X with 256 GB HBM3e at 6 TB/s per GPU (2 TB per node).",
+    sources: ["AMD Instinct MI325X datasheet"],
+  },
+  {
+    id: "mi355x-8gpu",
+    label: "AMD Instinct MI355X node (8x GPU)",
+    category: "amd-instinct",
+    gpuCount: 8,
+    memoryBytesPerGpu: 288e9,
+    memoryBandwidthBytesPerSecondPerGpu: 8e12,
+    flopsPerByte: 1258,
+    nativeComputeBytes: 0.5,
+    interconnect: "single-node-nvlink",
+    confidence: "source-backed",
+    notes:
+      "CDNA4 with native FP4/FP6: 288 GB HBM3e at 8 TB/s per GPU — memory-identical to B300 — and ~10.1 PFLOPS dense FP4. AMD's Blackwell Ultra competitor; 2.3 TB per node.",
+    sources: ["AMD Instinct MI355X datasheet"],
+  },
+  {
+    id: "mi455x-8gpu",
+    label: "AMD Instinct MI455X node (8x GPU)",
+    category: "amd-instinct",
+    gpuCount: 8,
+    memoryBytesPerGpu: 432e9,
+    memoryBandwidthBytesPerSecondPerGpu: 23.3e12,
+    flopsPerByte: 1728,
+    nativeComputeBytes: 0.5,
+    interconnect: "single-node-nvlink",
+    confidence: "source-backed",
+    notes:
+      "CDNA5 flagship (launched July 2026, volume 2H 2026): 432 GB HBM4 at 23.3 TB/s per GPU, ~40.3 PFLOPS dense MXFP4. 50% more HBM than a Rubin package; 3.5 TB per node. Also the building block of AMD's Helios rack.",
+    sources: ["AMD Instinct MI455X launch specs (Advancing AI 2026)"],
+  },
+
+  // -------------------------------------------------------------------------
+  // AMD Strix Halo APU — unified LPDDR5X like Apple Silicon / DGX Spark.
+  // Same caveats as the Apple notes above: shared memory pool, fp16 execution
+  // for int4 quants (llama.cpp/ROCm), theoretical peaks far above realised.
+  // -------------------------------------------------------------------------
+  {
+    id: "ryzen-ai-max-395-128gb",
+    label: "AMD Ryzen AI Max+ 395 — 128 GB (Strix Halo)",
+    category: "amd-apu",
+    gpuCount: 1,
+    memoryBytesPerGpu: 128e9,
+    memoryBandwidthBytesPerSecondPerGpu: 256e9,
+    flopsPerByte: 230,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "The DGX Spark's x86 competitor (Framework Desktop, mini-PCs): 128 GB unified LPDDR5X-8000 at 256 GB/s with a 40-CU RDNA 3.5 GPU. flopsPerByte uses the ~59 TFLOPS dual-issue fp16 peak, which is rarely realised — bandwidth-bound either way. Also sold in 32/64 GB configs.",
+    sources: ["AMD Ryzen AI Max+ 395 product page"],
+  },
+
+  // -------------------------------------------------------------------------
+  // Intel Gaudi 3 — sold as an 8-accelerator OAM baseboard. vLLM support
+  // exists but is niche next to CUDA/ROCm.
+  // -------------------------------------------------------------------------
+  {
+    id: "gaudi3-8x",
+    label: "Intel Gaudi 3 node (8x accelerator)",
+    category: "intel-gaudi",
+    gpuCount: 8,
+    memoryBytesPerGpu: 128e9,
+    memoryBandwidthBytesPerSecondPerGpu: 3.7e12,
+    flopsPerByte: 496,
+    nativeComputeBytes: 1,
+    interconnect: "single-node-nvlink",
+    confidence: "source-backed",
+    notes:
+      "8x Gaudi 3 on the standard HLB-325 baseboard: 128 GB HBM2e at 3.7 TB/s and ~1835 TFLOPS dense FP8 each, linked by on-package RoCE. Aggressive pricing is the pitch; software maturity is the catch.",
+    sources: ["Intel Gaudi 3 white paper"],
+  },
+
+  // -------------------------------------------------------------------------
+  // Apple Silicon (MacBook Pro, Mac mini, Mac Studio — M1 → M5 generations)
   // Bandwidth and core counts taken from Apple's published specs.
   // flopsPerByte = 2 × public fp32 TFLOPS / memory bandwidth (rough fp16 peak).
   // See top-of-file notes for the unified-memory and precision caveats.
@@ -639,5 +905,82 @@ export const hardwarePresets: HardwarePreset[] = [
     notes:
       "Mac mini M4 Pro top BTO at 64 GB. Headroom for 70B int4 quants. Same memory footprint as MBP M4 Max 64 GB at half the bandwidth.",
     sources: ["Apple Mac mini (M4 Pro) tech specs"],
+  },
+
+  // ---- Mac Studio ----
+  {
+    id: "mac-studio-m2-ultra-192gb",
+    label: "Mac Studio M2 Ultra — 192 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 192e9,
+    memoryBandwidthBytesPerSecondPerGpu: 800e9,
+    flopsPerByte: 68,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "Two M2 Max dies on UltraFusion: 76-core GPU, 192 GB unified, 800 GB/s. Discontinued but common secondhand — long the default local box for 70B–120B int4.",
+    sources: ["Apple M2 Ultra tech specs"],
+  },
+  {
+    id: "mac-studio-m3-ultra-256gb",
+    label: "Mac Studio M3 Ultra — 256 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 256e9,
+    memoryBandwidthBytesPerSecondPerGpu: 819e9,
+    flopsPerByte: 80,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "M3 Ultra (80-core GPU) at 256 GB unified, 819 GB/s. Fits GPT-OSS-120B-class and large MoE quants with room for KV.",
+    sources: ["Apple Mac Studio (M3 Ultra) tech specs"],
+  },
+  {
+    id: "mac-studio-m3-ultra-512gb",
+    label: "Mac Studio M3 Ultra — 512 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 512e9,
+    memoryBandwidthBytesPerSecondPerGpu: 819e9,
+    flopsPerByte: 80,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "The canonical \"DeepSeek-V3 int4 on your desk\" machine: 512 GB unified at 819 GB/s. Discontinued March 2026 in favour of the M5 Ultra, but plenty are in the field.",
+    sources: ["Apple Mac Studio (M3 Ultra) tech specs"],
+  },
+  {
+    id: "mac-studio-m5-max-128gb",
+    label: "Mac Studio M5 Max — 128 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 128e9,
+    memoryBandwidthBytesPerSecondPerGpu: 614e9,
+    flopsPerByte: 65,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "2026 Mac Studio, M5 Max 40-core GPU at 614 GB/s. flopsPerByte keeps the shader-fp16 convention; the per-core Neural Accelerators lift matmul well beyond it, so prefill is better than this ratio suggests — decode stays bandwidth-bound.",
+    sources: ["Apple Mac Studio (M5 Max) tech specs"],
+  },
+  {
+    id: "mac-studio-m5-ultra-512gb",
+    label: "Mac Studio M5 Ultra — 512 GB",
+    category: "apple-silicon",
+    gpuCount: 1,
+    memoryBytesPerGpu: 512e9,
+    memoryBandwidthBytesPerSecondPerGpu: 1228e9,
+    flopsPerByte: 65,
+    nativeComputeBytes: 2,
+    interconnect: "single-gpu",
+    confidence: "estimated",
+    notes:
+      "2026 flagship (announced Aug 2026; 512 GB config ships late Oct 2026): 80-core GPU with Neural Accelerators, 512 GB unified at ~1.23 TB/s — half an H100's bandwidth with 6x its memory. Also configurable at 96/256 GB.",
+    sources: ["Apple Mac Studio (M5 Ultra) tech specs", "Apple Newsroom, Aug 2026"],
   },
 ];
