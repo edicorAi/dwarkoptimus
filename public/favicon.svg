@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- "The Chart" mark: compute diagonal (teal), weight-fetch floor (amber),
+       and the bold max() envelope (green) — the app's latency chart. -->
+  <rect x="0.5" y="0.5" width="63" height="63" rx="13.5" fill="#f3f5f2" stroke="#c9d2cb"/>
+  <path d="M10 50 L54 14" fill="none" stroke="#0c6f7d" stroke-width="3" stroke-linecap="round" opacity="0.55"/>
+  <path d="M10 30 H54" fill="none" stroke="#a56b12" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+  <path d="M10 30 H34.4 L54 14" fill="none" stroke="#1f7a55" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

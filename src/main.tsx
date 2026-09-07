@@ -517,7 +517,9 @@ function App() {
 
       <header className="hero">
         <div>
-          <p className="eyebrow">dwarkoptimus</p>
+          <p className="eyebrow brand-lockup">
+            <BrandMark /> dwarkoptimus
+          </p>
           <h1>Roofline math for serving LLMs on real GPUs</h1>
           <p className="dek">
             Pick a model and the hardware you actually have. Get a fit verdict, the real bottleneck
@@ -867,6 +869,27 @@ function App() {
 
 function SectionTitle({ title }: { title: string }) {
   return <h2 className="section-title">{title}</h2>;
+}
+
+// "The Chart" brand mark — the latency chart as a tile: compute diagonal
+// (teal), weight-fetch floor (amber), bold max() envelope (green). Kept in
+// sync with public/favicon.svg.
+function BrandMark({ size = 22 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 64 64" width={size} height={size} aria-hidden="true" focusable="false">
+      <rect x="0.5" y="0.5" width="63" height="63" rx="13.5" fill="#f3f5f2" stroke="#c9d2cb" />
+      <path d="M10 50 L54 14" fill="none" stroke="#0c6f7d" strokeWidth="3" strokeLinecap="round" opacity="0.55" />
+      <path d="M10 30 H54" fill="none" stroke="#a56b12" strokeWidth="3" strokeLinecap="round" opacity="0.45" />
+      <path
+        d="M10 30 H34.4 L54 14"
+        fill="none"
+        stroke="#1f7a55"
+        strokeWidth="6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 function DocsPanel() {
