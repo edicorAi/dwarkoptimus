@@ -5,13 +5,16 @@ import {
   calculateScenario,
   createServingPlan,
   getBatchThreshold,
+  getCostPerMillionTokens,
   getCrossoverContextTokens,
   getHbmDrainTime,
   getLifecycleFlops,
   getMaxFittingBatch,
   getMoeMultiRackRatio,
+  getOptimalBatch,
   getPipelineBubble,
   getRooflineSweep,
+  getServeModelArg,
 } from "./calculations";
 import { hardwarePresets } from "../data/hardware";
 import { modelPresets } from "../data/models";
@@ -462,5 +465,94 @@ describe("serving plan", () => {
     const plan = createServingPlan(scenario, calculateScenario(scenario));
     expect(plan.recommendedTensorParallelSize).toBe(4);
     expect(plan.recommendedFlags.some((f) => f.startsWith("--pipeline-parallel-size"))).toBe(false);
+  });
+});
+
+describe("dollar cost per million tokens", () => {
+  it("computes cost from pool $/hour, step time, and batch", () => {
+    // 8 GPUs at $3.60/hr → pool costs $0.008/s. A 10 ms step serving 100
+    // sequences yields 100 tokens per step → $0.0000008/token → $0.80/1M.
+    expect(
+      getCostPerMillionTokens({ costPerGpuHour: 3.6, gpuCount: 8, stepSeconds: 0.01, batchSize: 100 }),
+    ).toBeCloseTo(0.8);
+  });
+
+  it("is NaN when no price is known", () => {
+    expect(
+      getCostPerMillionTokens({ costPerGpuHour: 0, gpuCount: 8, stepSeconds: 0.01, batchSize: 100 }),
+    ).toBeNaN();
+  });
+
+  it("scenario cost sits exactly on the roofline sweep curve at the same batch", () => {
+    const scenario = buildScenario(b300, qwen, { batchSize: 128, costPerGpuHour: 3.6 });
+    const result = calculateScenario(scenario);
+    const sweepPoint = getRooflineSweep(scenario, { samples: 2, maxBatch: 128 })[1]; // batch = 128
+    expect(sweepPoint.batch).toBeCloseTo(128);
+    const poolCostPerSecond = (3.6 * b300.gpuCount) / 3600;
+    expect(result.costPerMillionTokensUsd).toBeCloseTo(sweepPoint.costPerToken * poolCostPerSecond * 1e6);
+  });
+
+  it("defaults the scenario rate to the hardware preset market price", () => {
+    const scenario = buildScenario(h200, qwen);
+    expect(scenario.costPerGpuHour).toBe(h200.costPerGpuHourUsd);
+  });
+
+  it("returns NaN cost for non-decoder workloads", () => {
+    const scenario = buildScenario(b300, granite, { costPerGpuHour: 3.6 });
+    expect(calculateScenario(scenario).costPerMillionTokensUsd).toBeNaN();
+  });
+});
+
+describe("optimal batch", () => {
+  it("locks to the knee when HBM has room above it", () => {
+    expect(getOptimalBatch({ maxFittingBatch: 1000, batchThreshold: 300 })).toEqual({
+      batch: 300,
+      binding: "knee",
+    });
+  });
+
+  it("clamps to the HBM ceiling when the knee is out of reach", () => {
+    expect(getOptimalBatch({ maxFittingBatch: 279, batchThreshold: 50000 })).toEqual({
+      batch: 279,
+      binding: "hbm",
+    });
+  });
+
+  it("reports infeasible when nothing fits", () => {
+    expect(getOptimalBatch({ maxFittingBatch: 0, batchThreshold: 500 })).toEqual({
+      batch: 1,
+      binding: "infeasible",
+    });
+    expect(getOptimalBatch({ maxFittingBatch: Number.NaN, batchThreshold: 500 }).binding).toBe("infeasible");
+  });
+});
+
+describe("time to first token", () => {
+  it("equals context divided by prefill throughput", () => {
+    const scenario = buildScenario(b300, qwen, { batchSize: 64 });
+    const result = calculateScenario(scenario);
+    expect(result.ttftSeconds).toBeCloseTo(scenario.contextTokens / result.prefillTokensPerSecond);
+  });
+
+  it("is NaN for non-decoder workloads", () => {
+    const result = calculateScenario(buildScenario(b300, granite));
+    expect(result.ttftSeconds).toBeNaN();
+  });
+});
+
+describe("vLLM serve model argument", () => {
+  it("derives the HF repo path from a curated preset's sources", () => {
+    const kimi = modelPresets.find((m) => m.id === "kimi-k2.6")!;
+    expect(getServeModelArg(kimi)).toBe("moonshotai/Kimi-K2.6");
+  });
+
+  it("strips the hf: prefix for imported presets", () => {
+    expect(
+      getServeModelArg({ ...qwen, id: "hf:Qwen/Qwen3-Coder-Next-80B-A3B", sources: [] }),
+    ).toBe("Qwen/Qwen3-Coder-Next-80B-A3B");
+  });
+
+  it("falls back to the label when no repo is known", () => {
+    expect(getServeModelArg({ ...qwen, sources: ["Qwen3-Coder-Next model card"] })).toBe(qwen.label);
   });
 });

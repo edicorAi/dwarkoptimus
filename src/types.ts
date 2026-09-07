@@ -30,6 +30,10 @@ export type HardwarePreset = {
   // Used to rescale roofline math when serving at a different precision than the spec.
   nativeComputeBytes: number;
   interconnect: Interconnect;
+  // Approximate marketplace/neocloud on-demand rental rate per GPU-hour (USD).
+  // Only set on SKUs with a real rental market; owned/desktop/rack hardware
+  // omits it and the operator supplies their own rate in the Planner.
+  costPerGpuHourUsd?: number;
   confidence: Confidence;
   notes: string;
   sources: string[];
@@ -81,6 +85,10 @@ export type ScenarioInputs = {
   // Multiplier on the 2N forward baseline for inference FLOPs. Default 5
   // captures the lecture's "decode MFU ≈ 1/5 of prefill" rule of thumb.
   inferenceInefficiency: number;
+  // USD per GPU-hour used for the dollar-cost figures. 0 = unknown (cost
+  // metrics render as "--"). Defaults to the hardware preset's market
+  // estimate; the Planner lets the operator override it.
+  costPerGpuHour: number;
 };
 
 export type LifecycleFlops = {
@@ -129,6 +137,19 @@ export type ScenarioResult = {
   // compute-bound and memory-bound regimes. Below: compute is the wall.
   // Above: KV bandwidth is. NaN if kvBytesPerToken is 0.
   crossoverContextTokens: number;
+  // Roofline step time evaluated at the ACTUAL batch — the same
+  // max(compute, weight-fetch + KV-fetch) formula the sweep charts use, so
+  // the cost tile always equals the cost chart at the current batch. This is
+  // deliberately different from stepIntervalSeconds (the HBM-drain
+  // heuristic), which stays the basis for the throughput tiles.
+  rooflineStepSeconds: number;
+  // Time to first token: compute-bound prefill of the full context
+  // (contextTokens / prefillTokensPerSecond). Best case — real TTFT adds
+  // queueing and scheduling. NaN for non-decoder workloads.
+  ttftSeconds: number;
+  // USD per million generated tokens, from the roofline step time at this
+  // batch × pool $/hour. NaN when no $/GPU-hour is known.
+  costPerMillionTokensUsd: number;
   // Pipeline parallelism efficiency. With P stages and B in-flight micro-
   // batches, the bubble fraction is (P-1)/(B+P-1). pipelineEfficiency =
   // 1 - bubbleFraction is the throughput multiplier already applied to

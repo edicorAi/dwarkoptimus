@@ -32,6 +32,16 @@ export function formatBytes(value: number): string {
   return `${formatNumber(value)} B`;
 }
 
+export function formatUsd(value: number): string {
+  if (!Number.isFinite(value)) return "--";
+  const abs = Math.abs(value);
+  if (abs >= 1000) return `$${formatCompact(value)}`;
+  if (abs >= 1) return `$${value.toFixed(2)}`;
+  if (abs >= 0.01) return `$${value.toFixed(3)}`;
+  if (abs === 0) return "$0";
+  return `$${value.toPrecision(2)}`;
+}
+
 export function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds)) return "--";
   if (seconds >= 1) return `${formatNumber(seconds)} s`;

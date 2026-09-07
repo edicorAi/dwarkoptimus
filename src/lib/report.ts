@@ -1,5 +1,5 @@
 import type { HardwarePreset, ModelPreset, ScenarioInputs, ScenarioResult, ServingPlan } from "../types";
-import { formatBytes, formatCompact, formatNumber, formatTime } from "./units";
+import { formatBytes, formatCompact, formatNumber, formatTime, formatUsd } from "./units";
 
 export type ReportInput = {
   hardware: HardwarePreset;
@@ -97,6 +97,9 @@ export function buildScenarioReport(input: ReportInput): string {
   lines.push(`| Pipeline stages | ${scenario.pipelineStages} |`);
   lines.push(`| Expert parallelism | ${scenario.expertParallelism} |`);
   lines.push(`| Safety margin | ${scenario.safetyMargin} |`);
+  if (scenario.costPerGpuHour > 0) {
+    lines.push(`| GPU cost | ${formatUsd(scenario.costPerGpuHour)} / GPU·hour |`);
+  }
   lines.push("");
 
   lines.push("## Memory fit");
@@ -151,6 +154,12 @@ export function buildScenarioReport(input: ReportInput): string {
   lines.push(
     `| Crossover context (compute → memory bound) | ${Number.isFinite(result.crossoverContextTokens) ? `${formatCompact(result.crossoverContextTokens)} tok` : "—"} |`,
   );
+  lines.push(`| Time to first token (compute-bound prefill) | ${timeOrDash(result.ttftSeconds)} |`);
+  if (Number.isFinite(result.costPerMillionTokensUsd)) {
+    lines.push(
+      `| Serving cost (roofline step at this batch) | ${formatUsd(result.costPerMillionTokensUsd)} / 1M tokens at ${formatUsd(scenario.costPerGpuHour)}/GPU·hr × ${hardware.gpuCount} GPUs |`,
+    );
+  }
   if (scenario.pipelineStages > 1) {
     lines.push(
       `| Pipeline efficiency | ${formatNumber(result.pipelineEfficiency * 100, 1)}% (bubble ${formatNumber(result.pipelineBubbleFraction * 100, 1)}%) |`,

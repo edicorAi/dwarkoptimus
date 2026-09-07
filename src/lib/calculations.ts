@@ -32,6 +32,7 @@ export function buildScenario(
     rlTokens: overrides.rlTokens ?? 0,
     rlInefficiency: overrides.rlInefficiency ?? 3,
     inferenceInefficiency: overrides.inferenceInefficiency ?? 5,
+    costPerGpuHour: overrides.costPerGpuHour ?? hardware.costPerGpuHourUsd ?? 0,
   };
 }
 
@@ -113,6 +114,20 @@ export function calculateScenario(input: ScenarioInputs): ScenarioResult {
         kvBytesPerToken: input.kvBytesPerToken,
       })
     : Number.NaN;
+  // Roofline step time at the actual batch: same max(compute, weight+KV
+  // fetch) as getRooflineSweep, so the $/1M-tokens figure lands exactly on
+  // the cost chart's curve at the current batch.
+  const bandwidthPool = input.hardware.memoryBandwidthBytesPerSecondPerGpu * input.hardware.gpuCount;
+  const rooflineStepSeconds = isDecoder
+    ? Math.max(computeSecondsAtBatch, (weightBytesTotal + kvBytesTotal) / bandwidthPool)
+    : Number.NaN;
+  const ttftSeconds = isDecoder ? safeDivide(input.contextTokens, prefillTokensPerSecond) : Number.NaN;
+  const costPerMillionTokensUsd = getCostPerMillionTokens({
+    costPerGpuHour: input.costPerGpuHour,
+    gpuCount: input.hardware.gpuCount,
+    stepSeconds: rooflineStepSeconds,
+    batchSize: input.batchSize,
+  });
   // If the user left the manual tps override at the default, prefer the derived value
   // for the lifetime-tokens estimate so the Chinchilla figure is realistic.
   const tpsForLifetime =
@@ -178,6 +193,9 @@ export function calculateScenario(input: ScenarioInputs): ScenarioResult {
     prefillTokensPerSecond,
     decodeMfu,
     crossoverContextTokens,
+    rooflineStepSeconds,
+    ttftSeconds,
+    costPerMillionTokensUsd,
     pipelineBubbleFraction: pipelineBubble.fraction,
     pipelineEfficiency: pipelineBubble.efficiency,
     microBatchCount: pipelineBubble.microBatchCount,
@@ -301,6 +319,45 @@ export function getCrossoverContextTokens({
 }): number {
   if (kvBytesPerToken <= 0 || flopsPerByte <= 0 || activeParams <= 0) return Number.NaN;
   return activeParams / (flopsPerByte * kvBytesPerToken);
+}
+
+// Dollar cost per million generated tokens. The whole pool is billed for the
+// step regardless of batch, so cost/token = step_time × pool_$/s ÷ batch.
+// Uses the roofline step time (not the HBM-drain heuristic) so the figure
+// matches the cost chart's curve. NaN when no $/GPU-hour is known — the UI
+// renders that as "set a price".
+export function getCostPerMillionTokens({
+  costPerGpuHour,
+  gpuCount,
+  stepSeconds,
+  batchSize,
+}: {
+  costPerGpuHour: number;
+  gpuCount: number;
+  stepSeconds: number;
+  batchSize: number;
+}): number {
+  if (!Number.isFinite(costPerGpuHour) || costPerGpuHour <= 0) return Number.NaN;
+  if (!Number.isFinite(stepSeconds) || stepSeconds <= 0 || batchSize <= 0 || gpuCount <= 0) return Number.NaN;
+  const poolCostPerSecond = (costPerGpuHour * gpuCount) / 3600;
+  return ((stepSeconds * poolCostPerSecond) / batchSize) * 1e6;
+}
+
+// The batch the auto-tuner locks to: the largest size that fits HBM
+// (maxFittingBatch) without going past the weight-amortization knee
+// (batchThreshold). Whichever is smaller wins — beyond either is wasted
+// (OOM vs latency without extra throughput). `binding` says which bound won.
+export function getOptimalBatch({
+  maxFittingBatch,
+  batchThreshold,
+}: {
+  maxFittingBatch: number;
+  batchThreshold: number;
+}): { batch: number; binding: "knee" | "hbm" | "infeasible" } {
+  const ceiling = Math.floor(maxFittingBatch);
+  if (!Number.isFinite(ceiling) || ceiling <= 0) return { batch: 1, binding: "infeasible" };
+  const knee = Math.max(1, Math.round(batchThreshold));
+  return knee <= ceiling ? { batch: knee, binding: "knee" } : { batch: ceiling, binding: "hbm" };
 }
 
 // Pipeline parallelism bubble. With P stages and M micro-batches in flight,
@@ -581,6 +638,18 @@ export function getRooflineSweep(
   });
 }
 
+// The model argument `vllm serve` actually needs is a Hugging Face repo path
+// (org/name), not our preset label. HF imports carry it in their id
+// ("hf:org/name"); curated presets usually cite the repo in sources[].
+export function getServeModelArg(model: ModelPreset): string {
+  if (model.id.startsWith("hf:")) return model.id.slice(3);
+  for (const source of model.sources) {
+    const match = source.match(/huggingface\.co\/([\w.-]+\/[\w.-]+)/);
+    if (match) return match[1];
+  }
+  return model.label;
+}
+
 export function createServingPlan(input: ScenarioInputs, result: ScenarioResult): ServingPlan {
   const requestedBatch = Math.max(1, Math.floor(input.batchSize));
   const maxFittingBatch = Number.isFinite(result.maxFittingBatch) ? Math.max(0, result.maxFittingBatch) : 0;
@@ -640,7 +709,7 @@ export function createServingPlan(input: ScenarioInputs, result: ScenarioResult)
     recommendedMaxNumSeqs,
     recommendedMaxNumBatchedTokens,
     recommendedFlags: flags,
-    command: [`vllm serve ${input.model.label}`, ...flags.map((flag) => `  ${flag}`)].join(" \\\n"),
+    command: [`vllm serve ${getServeModelArg(input.model)}`, ...flags.map((flag) => `  ${flag}`)].join(" \\\n"),
     summary: fitsRequestedBatch
       ? `Plan for batch ${plannedBatch} at ${recommendedMaxModelLen} tokens context.`
       : `Selected batch ${requestedBatch} does not fit at this context — planning caps at ${plannedBatch}.`,

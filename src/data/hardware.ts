@@ -13,6 +13,12 @@ import type { HardwarePreset } from "../types";
 //   typically 30–50% of peak, so most LLM serving on these will be HBM-bound
 //   in practice — which the bottleneck classifier already says.
 
+// costPerGpuHourUsd: approximate marketplace/neocloud on-demand rates as of
+// Sept 2026 (getdeploying.com / intuitionlabs.ai / thundercompute.com price
+// indexes). Hyperscaler list prices run 2–4× higher. Only set on SKUs with a
+// real rental market — owned/desktop/rack hardware omits it and the Planner's
+// $/GPU·hour field lets the operator supply their own rate.
+
 export const hardwarePresets: HardwarePreset[] = [
   // -------------------------------------------------------------------------
   // NVIDIA Rubin (in production 2026, deployments ramping). Per-package specs
@@ -74,6 +80,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 2500,
     nativeComputeBytes: 0.5,
     interconnect: "single-node-nvlink",
+    costPerGpuHourUsd: 5,
     confidence: "source-backed",
     notes: "Common 8-GPU Blackwell B200 server shape using public per-GPU HBM and bandwidth specifications.",
     sources: ["NVIDIA B200 public specs"],
@@ -167,6 +174,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 412,
     nativeComputeBytes: 1,
     interconnect: "multi-node-network",
+    costPerGpuHourUsd: 3.3,
     confidence: "user-provided",
     notes:
       "Your four H200 servers modeled as one aggregate pool. Memory math works, but cross-server traffic may be the real limiter.",
@@ -182,6 +190,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 412,
     nativeComputeBytes: 1,
     interconnect: "single-node-nvlink",
+    costPerGpuHourUsd: 3.3,
     confidence: "user-provided",
     notes: "One of your H200 servers modeled as 4 H200 GPUs.",
     sources: ["User hardware inventory", "NVIDIA H200 public specs"],
@@ -196,6 +205,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 412,
     nativeComputeBytes: 1,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 3.3,
     confidence: "source-backed",
     notes: "Single H200 SXM reference preset.",
     sources: ["NVIDIA H200 public specs"],
@@ -210,6 +220,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 590,
     nativeComputeBytes: 1,
     interconnect: "single-node-nvlink",
+    costPerGpuHourUsd: 2.5,
     confidence: "source-backed",
     notes: "Common 8-GPU H100 SXM server shape.",
     sources: ["NVIDIA H100 public specs"],
@@ -224,6 +235,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 500,
     nativeComputeBytes: 1,
     interconnect: "single-node-nvlink",
+    costPerGpuHourUsd: 2.8,
     confidence: "source-backed",
     notes: "Dual-GPU H100 NVL reference shape with larger per-GPU memory than standard H100 SXM.",
     sources: ["NVIDIA H100 NVL public specs"],
@@ -238,6 +250,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 590,
     nativeComputeBytes: 1,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 2.5,
     confidence: "source-backed",
     notes: "Single H100 SXM reference preset.",
     sources: ["NVIDIA H100 public specs"],
@@ -252,6 +265,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 757,
     nativeComputeBytes: 1,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 2.2,
     confidence: "source-backed",
     notes:
       "What most clouds actually rent as \"an H100\": HBM2e at 2.0 TB/s (vs 3.35 on SXM) and lower clocks. Same 80 GB, meaningfully slower decode.",
@@ -267,6 +281,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 404,
     nativeComputeBytes: 1,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 2.8,
     confidence: "source-backed",
     notes:
       "Grace Hopper superchip, HBM3e variant. The 480 GB LPDDR5X on the Grace side is coherent but ~10x slower than HBM and is not modeled here — treat this as a slightly faster H200. A 96 GB HBM3 variant also exists.",
@@ -297,6 +312,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 156,
     nativeComputeBytes: 2,
     interconnect: "single-node-nvlink",
+    costPerGpuHourUsd: 1.3,
     confidence: "source-backed",
     notes: "Common 8-GPU A100 80GB server shape.",
     sources: ["NVIDIA A100 public specs"],
@@ -311,6 +327,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 156,
     nativeComputeBytes: 2,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 1.3,
     confidence: "source-backed",
     notes: "Single A100 80GB reference preset.",
     sources: ["NVIDIA A100 public specs"],
@@ -325,6 +342,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 201,
     nativeComputeBytes: 2,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 1,
     confidence: "source-backed",
     notes:
       "Original A100 SKU: half the HBM of the 80 GB refresh at 1.555 TB/s. Still everywhere on cheap cloud spot markets; fine for ≤13B bf16 or ~30B int4.",
@@ -340,6 +358,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 558,
     nativeComputeBytes: 0.5,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 1.6,
     confidence: "source-backed",
     notes:
       "Blackwell workstation flagship: 96 GB ECC GDDR7 at 1.79 TB/s with FP4 tensor cores (~1 PFLOPS dense; the 4000-TOPS headline is sparse marketing). The most memory you can get on a single PCIe card — the new prosumer serving default for 70B-class models.",
@@ -355,6 +374,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 850,
     nativeComputeBytes: 1,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 0.85,
     confidence: "source-backed",
     notes: "Single L40S accelerator reference. Useful for smaller models and throughput tests, not large long-context serving.",
     sources: ["NVIDIA L40S public specs"],
@@ -369,6 +389,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 400,
     nativeComputeBytes: 1,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 0.45,
     confidence: "source-backed",
     notes:
       "Cheap Ada Lovelace inference card. 24 GB GDDR6 with low bandwidth — fine for small models, painful for long context.",
@@ -384,6 +405,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 467,
     nativeComputeBytes: 0.5,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 0.55,
     confidence: "source-backed",
     notes:
       "Blackwell consumer. 32 GB GDDR7 at ~1.79 TB/s. FP4 tensor cores make this surprisingly competent for quantized local serving.",
@@ -399,6 +421,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 469,
     nativeComputeBytes: 0.5,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 0.3,
     confidence: "source-backed",
     notes:
       "Blackwell consumer, one tier down. 16 GB GDDR7 at 960 GB/s — plenty of compute and bandwidth, but 16 GB caps you at ~13B fp8 / ~30B fp4 with short context.",
@@ -414,6 +437,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 327,
     nativeComputeBytes: 1,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 0.4,
     confidence: "source-backed",
     notes:
       "Ada Lovelace flagship. 24 GB GDDR6X at ~1 TB/s with FP8 tensor cores. The default homelab card for running ≤30B models.",
@@ -429,6 +453,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 200,
     nativeComputeBytes: 2,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 0.45,
     confidence: "source-backed",
     notes:
       "Ampere pro card with 48 GB ECC GDDR6. No FP8, but the extra memory makes it the practical choice for fitting larger models on one card.",
@@ -444,6 +469,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 152,
     nativeComputeBytes: 2,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 0.22,
     confidence: "source-backed",
     notes:
       "Ampere consumer with 24 GB GDDR6X. No FP8 — bf16/fp16 only. Still popular second-hand for local 7B–13B serving.",
@@ -474,6 +500,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 139,
     nativeComputeBytes: 2,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 0.25,
     confidence: "source-backed",
     notes:
       "Volta generation. FP16 tensor cores only — no bf16/fp8/fp4. Mostly historical at this point; useful as a cost-floor reference.",
@@ -489,6 +516,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 139,
     nativeComputeBytes: 2,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 0.2,
     confidence: "source-backed",
     notes:
       "Original V100 SKU. Same Volta compute as the 32 GB variant, half the HBM. Long context fills it fast.",
@@ -513,6 +541,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 247,
     nativeComputeBytes: 1,
     interconnect: "single-node-nvlink",
+    costPerGpuHourUsd: 3,
     confidence: "source-backed",
     notes:
       "The standard non-NVIDIA serving node: 8x CDNA3 with 192 GB HBM3 at 5.3 TB/s each (1.5 TB total). More memory and bandwidth than H200 per GPU; ~1307 TFLOPS dense FP8 each.",
@@ -528,6 +557,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 247,
     nativeComputeBytes: 1,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 3,
     confidence: "source-backed",
     notes:
       "Single MI300X as rented on GPU clouds. 192 GB on one device fits 70B-class models in fp8 without tensor parallelism.",
@@ -543,6 +573,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 218,
     nativeComputeBytes: 1,
     interconnect: "single-node-nvlink",
+    costPerGpuHourUsd: 3.5,
     confidence: "source-backed",
     notes:
       "CDNA3 memory refresh: same ~1307 TFLOPS dense FP8 as MI300X with 256 GB HBM3e at 6 TB/s per GPU (2 TB per node).",

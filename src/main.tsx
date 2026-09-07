@@ -7,6 +7,7 @@ import {
   buildScenario,
   calculateScenario,
   createServingPlan,
+  getOptimalBatch,
   getRooflineSweep,
 } from "./lib/calculations";
 import { buildScenarioReport } from "./lib/report";
@@ -22,7 +23,7 @@ import {
   storeHfToken,
   type HfSearchHit,
 } from "./lib/huggingface";
-import { formatBytes, formatCompact, formatNumber, formatTime } from "./lib/units";
+import { formatBytes, formatCompact, formatNumber, formatTime, formatUsd } from "./lib/units";
 import type { HardwareCategory, HardwarePreset, ModelPreset, PrecisionMode, ScenarioInputs, ServingPlan } from "./types";
 import "./styles.css";
 
@@ -166,6 +167,10 @@ function useLocalStorageState<T>(key: string, defaultValue: T): [T, React.Dispat
   return [value, setValue];
 }
 
+function isDecoderArchitecture(model: ModelPreset): boolean {
+  return model.architecture === "dense" || model.architecture === "moe" || model.architecture === "hybrid";
+}
+
 function groupHardwareByCategory(presets: HardwarePreset[]): Array<{ category: HardwareCategory; items: HardwarePreset[] }> {
   const buckets = new Map<HardwareCategory, HardwarePreset[]>();
   for (const preset of presets) {
@@ -195,6 +200,8 @@ function App() {
   const [vCacheType, setVCacheType] = useLocalStorageState<KvQuantType>("vCacheType", "f16");
   const [tokensPerSecond, setTokensPerSecond] = useLocalStorageState("tokensPerSecond", 0);
   const [deploymentDays, setDeploymentDays] = useLocalStorageState("deploymentDays", 60);
+  // 0 = use the hardware preset's market rental estimate (when it has one).
+  const [costPerGpuHourOverride, setCostPerGpuHourOverride] = useLocalStorageState("costPerGpuHour", 0);
   const [hfPresets, setHfPresets] = useState<ModelPreset[]>(() => loadCachedHfPresets());
   const [optimizeNotes, setOptimizeNotes] = useState<string[] | null>(null);
   const allModelPresets = useMemo<ModelPreset[]>(() => [...modelPresets, ...hfPresets], [hfPresets]);
@@ -217,6 +224,7 @@ function App() {
   const hardware = plannerHardwarePresets.find((item) => item.id === hardwareId) ?? plannerHardwarePresets[0];
   const model = allModelPresets.find((item) => item.id === modelId) ?? allModelPresets[0];
   const weightBytesPerParam = precisionModes[precision].bytes ?? customWeightBytes;
+  const costPerGpuHour = costPerGpuHourOverride > 0 ? costPerGpuHourOverride : hardware.costPerGpuHourUsd ?? 0;
 
   const scenario = useMemo(
     () =>
@@ -234,6 +242,7 @@ function App() {
         rlTokens,
         rlInefficiency,
         inferenceInefficiency,
+        costPerGpuHour,
       }),
     [
       hardware,
@@ -251,32 +260,47 @@ function App() {
       rlTokens,
       rlInefficiency,
       inferenceInefficiency,
+      costPerGpuHour,
     ],
   );
   const result = useMemo(() => calculateScenario(scenario), [scenario]);
+  // Every enabled hardware preset, each evaluated at its OWN auto-tuned batch
+  // (min of its HBM ceiling and break-even knee). Comparing all rows at the
+  // batch tuned for the selected hardware would unfairly fail smaller pools.
+  // Each row uses its own market $/GPU·hour; the selected row uses the same
+  // effective price as the headline tile (i.e. the operator's override).
+  const isDecoderForComparison = isDecoderArchitecture(model);
   const comparison = useMemo(
     () =>
-      plannerHardwarePresets.slice(0, 4).map((item) => {
-        const compared = buildScenario(item, model, {
+      plannerHardwarePresets.map((item) => {
+        const base = {
           contextTokens,
-          batchSize,
           weightBytesPerParam,
           kvBytesPerToken,
           tokensPerSecond,
           deploymentDays,
-          pipelineStages,
+          pipelineStages: Math.min(pipelineStages, item.gpuCount),
           expertParallelism: Math.min(expertParallelism, item.gpuCount),
           safetyMargin,
           pretrainTokens,
           rlTokens,
           rlInefficiency,
           inferenceInefficiency,
-        });
+          costPerGpuHour: item.id === hardware.id ? costPerGpuHour : item.costPerGpuHourUsd ?? 0,
+        };
+        // maxFittingBatch and batchThreshold don't depend on batchSize, so one
+        // probe pass gives the row's own optimal batch.
+        const probe = calculateScenario(buildScenario(item, model, { ...base, batchSize: 1 }));
+        const tunedBatch = isDecoderForComparison ? getOptimalBatch(probe).batch : batchSize;
+        const compared = buildScenario(item, model, { ...base, batchSize: tunedBatch });
         return { hardware: item, scenario: compared, result: calculateScenario(compared) };
       }),
     [
       model,
       plannerHardwarePresets,
+      hardware.id,
+      costPerGpuHour,
+      isDecoderForComparison,
       contextTokens,
       batchSize,
       weightBytesPerParam,
@@ -299,22 +323,11 @@ function App() {
   // is smaller wins — going past either is wasted (OOM vs. latency without
   // extra throughput). Embedding/VLM workloads aren't decoder-shaped, so the
   // lock is a no-op there.
-  const isDecoderModel =
-    model.architecture === "dense" || model.architecture === "moe" || model.architecture === "hybrid";
-  const optimalBatch = useMemo(() => {
-    if (!isDecoderModel) return batchSize;
-    const ceiling = Math.floor(result.maxFittingBatch);
-    if (!Number.isFinite(ceiling) || ceiling <= 0) return 1;
-    const knee = Math.max(1, Math.round(result.batchThreshold));
-    return Math.max(1, Math.min(ceiling, knee));
-  }, [isDecoderModel, batchSize, result.maxFittingBatch, result.batchThreshold]);
-  const optimalBatchBinding: "knee" | "hbm" | "infeasible" = useMemo(() => {
-    if (!isDecoderModel) return "knee";
-    const ceiling = Math.floor(result.maxFittingBatch);
-    if (!Number.isFinite(ceiling) || ceiling <= 0) return "infeasible";
-    const knee = Math.max(1, Math.round(result.batchThreshold));
-    return knee <= ceiling ? "knee" : "hbm";
-  }, [isDecoderModel, result.maxFittingBatch, result.batchThreshold]);
+  const isDecoderModel = isDecoderForComparison;
+  const { batch: optimalBatch, binding: optimalBatchBinding } = useMemo(() => {
+    if (!isDecoderModel) return { batch: batchSize, binding: "knee" as const };
+    return getOptimalBatch(result);
+  }, [isDecoderModel, batchSize, result]);
   useEffect(() => {
     if (!autoTuneBatch || !isDecoderModel) return;
     if (optimalBatch !== batchSize) setBatchSize(optimalBatch);
@@ -365,7 +378,11 @@ function App() {
     setKCacheType("f16");
     setVCacheType("f16");
     setBatchSize(defaultServingBatch);
-    setPrecision(next.defaultWeightBytesPerParam <= 0.5 ? "fp4" : next.defaultWeightBytesPerParam <= 1 ? "fp8" : "bf16");
+    // The model's default precision may not be natively supported by the
+    // current hardware (e.g. an fp4 model on Hopper) — clamp like applyHardware does.
+    const preferred: PrecisionMode =
+      next.defaultWeightBytesPerParam <= 0.5 ? "fp4" : next.defaultWeightBytesPerParam <= 1 ? "fp8" : "bf16";
+    setPrecision(isPrecisionSupported(preferred, hardware) ? preferred : defaultPrecisionForHardware(hardware));
     setCustomWeightBytes(next.defaultWeightBytesPerParam);
     setOptimizeNotes(null);
   }
@@ -539,13 +556,13 @@ function App() {
                 setKCacheType("f16");
                 setVCacheType("f16");
                 setBatchSize(defaultServingBatch);
-                setPrecision(
+                const preferred: PrecisionMode =
                   preset.defaultWeightBytesPerParam <= 0.5
                     ? "fp4"
                     : preset.defaultWeightBytesPerParam <= 1
                       ? "fp8"
-                      : "bf16",
-                );
+                      : "bf16";
+                setPrecision(isPrecisionSupported(preferred, hardware) ? preferred : defaultPrecisionForHardware(hardware));
                 setCustomWeightBytes(preset.defaultWeightBytesPerParam);
               }}
               onForget={(presetId) => {
@@ -690,6 +707,19 @@ function App() {
               onChange={setTokensPerSecond}
               help="Leave at 0 to use the derived pool throughput (batch ÷ step). Override only if you have a measured rate."
             />
+            <NumberField
+              label="GPU cost ($ / GPU·hour)"
+              value={costPerGpuHourOverride}
+              min={0}
+              max={100}
+              step={0.1}
+              onChange={setCostPerGpuHourOverride}
+              help={
+                hardware.costPerGpuHourUsd
+                  ? `Drives the $/1M-tokens figures. Leave at 0 to use this preset's market rental estimate (${formatUsd(hardware.costPerGpuHourUsd)}/GPU·hr); set your own rate to override.`
+                  : "Drives the $/1M-tokens figures. This preset has no rental-market estimate (typically owned hardware) — enter your own amortized or rental rate."
+              }
+            />
 
             <SectionTitle title="Lifecycle FLOPs (optional)" />
             <NumberField
@@ -740,6 +770,7 @@ function App() {
             />
             <PlanningPanel
               plan={servingPlan}
+              autoTuneOn={autoTuneBatch && isDecoderModel}
               onApply={() => {
                 const target = Math.max(1, Math.floor(servingPlan.maxFittingBatch));
                 if (Number.isFinite(target) && target > 0) setBatchSize(target);
@@ -752,7 +783,7 @@ function App() {
               <LatencyChart scenario={scenario} batchThreshold={result.batchThreshold} />
               <CostChart scenario={scenario} batchThreshold={result.batchThreshold} />
             </div>
-            <ComparisonTable rows={comparison} selectedHardwareId={hardware.id} />
+            <ComparisonTable rows={comparison} selectedHardwareId={hardware.id} onSelectHardware={applyHardware} />
             <Assumptions
               hardware={hardware}
               model={model}
@@ -988,6 +1019,33 @@ utilization = required_per_gpu / available_per_gpu`}</pre>
         </p>
       </DocSection>
 
+      <DocSection id="cost" title="Dollars per million tokens">
+        <p>
+          Once a $/GPU·hour rate is known, per-token cost falls straight out of the roofline: the
+          whole pool is billed for every decode step regardless of how many users share it.
+        </p>
+        <pre className="docs-code">{`pool_$/s   = gpu_count × $/GPU·hour / 3600
+$ / token  = roofline_step_time × pool_$/s / batch
+$ / 1M tok = that × 1,000,000`}</pre>
+        <p>
+          The step time used here is <code>max(t_compute, t_memory)</code> at the <em>actual</em>{" "}
+          batch — the same curve the cost chart draws — not the HBM-drain heuristic behind the
+          throughput tiles. That keeps the headline tile, the chart, and the comparison table on
+          one basis. It's an idealized roofline figure: real serving lands above it (scheduling,
+          kernel efficiency, imperfect batching), so treat it as the physics floor, the same way
+          the rest of the calculator treats latency.
+        </p>
+        <p>
+          Where the rate comes from: presets with a real rental market carry an approximate
+          marketplace/neocloud on-demand rate (hyperscaler list prices run 2–4× higher). Owned
+          hardware (your B300 server, Mac Studios, DGX desktops) has no market rate — enter your
+          own amortized $/GPU·hour in the <em>GPU cost</em> field, which also overrides any preset
+          rate. The hardware comparison table prices each row with its own market rate and the
+          selected row with your effective rate, then sorts by verdict and cheapest $/1M tokens —
+          the row tagged <strong>best $</strong> is the cheapest hardware that comfortably fits.
+        </p>
+      </DocSection>
+
       <DocSection id="metrics" title="Every metric tile, explained">
         <dl className="docs-dl">
           <dt>Memory used / GPU</dt>
@@ -1039,6 +1097,19 @@ utilization = required_per_gpu / available_per_gpu`}</pre>
             tokens as a Chinchilla-optimal training run for this active-param size. Modern
             frontier deployments hit 100× and up — the over-training case Reiner discusses in the
             RL section of the lecture.
+          </dd>
+
+          <dt>Time to first token</dt>
+          <dd>
+            Compute-bound prefill of the full context:{" "}
+            <code>context_tokens / prefill_throughput</code>. A best case — real TTFT adds
+            queueing, scheduling, and chunked-prefill effects on top.
+          </dd>
+
+          <dt>Serving cost ($ / 1M tokens)</dt>
+          <dd>
+            Roofline step time at this batch × pool $/second ÷ batch, scaled to a million tokens.
+            See the <a href="#cost">dollars section</a> for the basis and caveats.
           </dd>
         </dl>
       </DocSection>
@@ -1115,6 +1186,13 @@ utilization = required_per_gpu / available_per_gpu`}</pre>
           <dt>Deployment days</dt>
           <dd>
             Model serving lifetime. Only affects Chinchilla coverage.
+          </dd>
+
+          <dt>GPU cost ($ / GPU·hour)</dt>
+          <dd>
+            Rate used for all dollar figures. 0 = use the preset's market rental estimate when it
+            has one; anything else overrides it. Owned hardware carries no estimate — enter your
+            own amortized rate.
           </dd>
         </dl>
       </DocSection>
@@ -1339,6 +1417,7 @@ function DocsToc() {
     ["kv-cache", "KV cache"],
     ["memory-fit", "Memory fit"],
     ["bottleneck", "Bottleneck classifier"],
+    ["cost", "Dollars per 1M tokens"],
     ["metrics", "Metric reference"],
     ["inputs", "Input reference"],
     ["auto-optimize", "Auto-optimize"],
@@ -1902,6 +1981,19 @@ function HeadlineStats({
           <strong>{Number.isFinite(tps) ? formatCompact(tps, " tok/s") : "--"}</strong>
           <small>pool tokens/second across all users (batch ÷ step)</small>
         </div>
+        <div>
+          <span>Serving cost</span>
+          <strong>
+            {Number.isFinite(result.costPerMillionTokensUsd)
+              ? `${formatUsd(result.costPerMillionTokensUsd)} / 1M tok`
+              : "--"}
+          </strong>
+          <small>
+            {Number.isFinite(result.costPerMillionTokensUsd)
+              ? `at ${formatUsd(scenario.costPerGpuHour)}/GPU·hr × ${scenario.hardware.gpuCount} GPU${scenario.hardware.gpuCount === 1 ? "" : "s"} — roofline step at this batch`
+              : "set $ / GPU·hour in the controls to see cost"}
+          </small>
+        </div>
       </div>
       {autoTuneOn && <p className="headline-binding">{bindingNote}</p>}
     </article>
@@ -1971,6 +2063,11 @@ function MetricGrid({ result, scenario }: { result: ReturnType<typeof calculateS
             : "--"
         }
         sub="compute-bound asymptote — what prefill achieves at full FLOPs"
+      />
+      <Metric
+        title="Time to first token"
+        value={Number.isFinite(result.ttftSeconds) ? formatTime(result.ttftSeconds) : "--"}
+        sub="compute-bound prefill of the full context — best case, before queueing"
       />
       <Metric
         title="Decode MFU"
@@ -2067,7 +2164,7 @@ function Metric({ title, value, sub }: { title: string; value: string; sub: stri
   );
 }
 
-function PlanningPanel({ plan, onApply }: { plan: ServingPlan; onApply: () => void }) {
+function PlanningPanel({ plan, autoTuneOn, onApply }: { plan: ServingPlan; autoTuneOn: boolean; onApply: () => void }) {
   function copyCommand() {
     void navigator.clipboard?.writeText(plan.command);
   }
@@ -2086,14 +2183,20 @@ function PlanningPanel({ plan, onApply }: { plan: ServingPlan; onApply: () => vo
           type="button"
           className="secondary-button"
           onClick={onApply}
-          disabled={noChange}
+          disabled={noChange || autoTuneOn}
           title={
-            noChange
-              ? "Batch is already at the largest size that fits"
-              : `Set batch to ${target.toLocaleString()}`
+            autoTuneOn
+              ? "Auto-tune batch is on — it already controls the batch size"
+              : noChange
+                ? "Batch is already at the largest size that fits"
+                : `Set batch to ${target.toLocaleString()}`
           }
         >
-          {noChange ? `At max (${target.toLocaleString()})` : `Use largest fitting batch (${target.toLocaleString()})`}
+          {autoTuneOn
+            ? "Auto-tuned"
+            : noChange
+              ? `At max (${target.toLocaleString()})`
+              : `Use largest fitting batch (${target.toLocaleString()})`}
         </button>
       </div>
 
@@ -2129,18 +2232,40 @@ function PlanningPanel({ plan, onApply }: { plan: ServingPlan; onApply: () => vo
   );
 }
 
+const verdictRank: Record<string, number> = { fits: 0, tight: 1, "does-not-fit": 2, "not-applicable": 3 };
+
 function ComparisonTable({
   rows,
   selectedHardwareId,
+  onSelectHardware,
 }: {
   rows: Array<{ hardware: HardwarePreset; scenario: ScenarioInputs; result: ReturnType<typeof calculateScenario> }>;
   selectedHardwareId: string;
+  onSelectHardware: (id: string) => void;
 }) {
+  // Selected hardware pinned first; the rest sorted into decision order:
+  // verdict, then $/1M tokens ascending (unknown cost last), then throughput.
+  const sorted = [...rows].sort((a, b) => {
+    if (a.hardware.id === selectedHardwareId) return -1;
+    if (b.hardware.id === selectedHardwareId) return 1;
+    const rank = verdictRank[a.result.verdict] - verdictRank[b.result.verdict];
+    if (rank !== 0) return rank;
+    const aCost = Number.isFinite(a.result.costPerMillionTokensUsd) ? a.result.costPerMillionTokensUsd : Infinity;
+    const bCost = Number.isFinite(b.result.costPerMillionTokensUsd) ? b.result.costPerMillionTokensUsd : Infinity;
+    if (aCost !== bCost) return aCost - bCost;
+    const aTps = Number.isFinite(a.result.derivedTokensPerSecond) ? a.result.derivedTokensPerSecond : 0;
+    const bTps = Number.isFinite(b.result.derivedTokensPerSecond) ? b.result.derivedTokensPerSecond : 0;
+    return bTps - aTps;
+  });
+  const bestValueId = sorted
+    .filter((row) => row.result.verdict === "fits" && Number.isFinite(row.result.costPerMillionTokensUsd))
+    .sort((a, b) => a.result.costPerMillionTokensUsd - b.result.costPerMillionTokensUsd)[0]?.hardware.id;
+
   return (
     <article className="panel">
       <div className="panel-heading">
         <h2>Hardware comparison</h2>
-        <span>same model and batch</span>
+        <span>same model and context · each row at its own auto-tuned batch</span>
       </div>
       <div className="table-wrap">
         <table>
@@ -2148,24 +2273,53 @@ function ComparisonTable({
             <tr>
               <th>Hardware</th>
               <th>Verdict</th>
+              <th>Batch</th>
+              <th>Throughput</th>
+              <th>$ / 1M tok</th>
               <th>Used / GPU</th>
-              <th>Remaining / GPU</th>
-              <th>Drain</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
-            {rows.map(({ hardware, result }) => (
-              <tr key={hardware.id} className={hardware.id === selectedHardwareId ? "selected-row" : ""}>
-                <td>{hardware.label}</td>
-                <td><Badge tone={result.verdict}>{result.verdictLabel.split(" on ")[0]}</Badge></td>
-                <td>{formatBytes(result.requiredBytesPerGpu)}</td>
-                <td>{formatBytes(result.memoryRemainingBytesPerGpu)}</td>
-                <td>{formatTime(result.hbmDrainSeconds)}</td>
-              </tr>
-            ))}
+            {sorted.map(({ hardware, scenario, result }) => {
+              const selected = hardware.id === selectedHardwareId;
+              return (
+                <tr key={hardware.id} className={selected ? "selected-row" : ""}>
+                  <td>
+                    {hardware.label}
+                    {hardware.id === bestValueId && <Badge tone="fits">best $</Badge>}
+                  </td>
+                  <td><Badge tone={result.verdict}>{result.verdictLabel.split(" on ")[0]}</Badge></td>
+                  <td>{formatCompact(scenario.batchSize)}</td>
+                  <td>
+                    {Number.isFinite(result.derivedTokensPerSecond)
+                      ? formatCompact(result.derivedTokensPerSecond, " tok/s")
+                      : "--"}
+                  </td>
+                  <td>
+                    {Number.isFinite(result.costPerMillionTokensUsd)
+                      ? formatUsd(result.costPerMillionTokensUsd)
+                      : "--"}
+                  </td>
+                  <td>{formatBytes(result.requiredBytesPerGpu)}</td>
+                  <td>
+                    {!selected && (
+                      <button type="button" className="link-button" onClick={() => onSelectHardware(hardware.id)}>
+                        Use
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+      <p className="chart-caption">
+        Each row picks its own batch (HBM ceiling capped at the break-even knee), so small pools aren't judged at a
+        batch tuned for big ones. Rows without a $ figure have no rental-market estimate — set $/GPU·hour to price the
+        selected hardware. Sorted: verdict, then cheapest per token.
+      </p>
     </article>
   );
 }
@@ -2354,12 +2508,19 @@ function CostChart({ scenario, batchThreshold }: { scenario: ScenarioInputs; bat
   const points = getRooflineSweep(scenario);
   const maxX = Math.max(...points.map((p) => p.batch));
   const trimmed = points.filter((p) => Number.isFinite(p.costPerToken));
+  // When a $/GPU·hour is known, the whole y-axis turns into dollars per 1M
+  // tokens — the same basis as the headline Serving-cost tile, which sits on
+  // this exact curve at the current batch.
+  const poolCostPerSecond =
+    scenario.costPerGpuHour > 0 ? (scenario.costPerGpuHour * scenario.hardware.gpuCount) / 3600 : null;
+  const toY = (costPerTokenSeconds: number) =>
+    poolCostPerSecond !== null ? costPerTokenSeconds * poolCostPerSecond * 1e6 : costPerTokenSeconds;
   // clamp the y range to the third sample onward — batch=1 explodes the hyperbola.
-  const maxY = Math.max(...trimmed.slice(2).map((p) => p.costPerToken), 1e-9);
+  const maxY = Math.max(...trimmed.slice(2).map((p) => toY(p.costPerToken)), 1e-9);
   const path = trimmed
     .map((point, index) => {
       const x = PLOT.left + (point.batch / maxX) * PLOT.width;
-      const yRaw = Math.min(point.costPerToken, maxY);
+      const yRaw = Math.min(toY(point.costPerToken), maxY);
       const y = PLOT.bottom - (yRaw / maxY) * PLOT.height;
       return `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
     })
@@ -2368,7 +2529,7 @@ function CostChart({ scenario, batchThreshold }: { scenario: ScenarioInputs; bat
     Number.isFinite(batchThreshold) && batchThreshold > 0 && batchThreshold < maxX
       ? PLOT.left + (batchThreshold / maxX) * PLOT.width
       : null;
-  const yFormat = (v: number) => `${formatTime(v)}/tok`;
+  const yFormat = poolCostPerSecond !== null ? (v: number) => formatUsd(v) : (v: number) => `${formatTime(v)}/tok`;
 
   return (
     <article className="panel">
@@ -2377,7 +2538,13 @@ function CostChart({ scenario, batchThreshold }: { scenario: ScenarioInputs; bat
         <span>Lower is cheaper. Flat tail = compute-bound</span>
       </div>
       <svg viewBox="0 0 560 240" className="latency-svg" role="img" aria-label="Cost per token vs batch chart">
-        <AxisGrid maxX={maxX} maxY={maxY} xFormat={(v) => formatCompact(v)} yFormat={yFormat} yUnit="cost / tok" />
+        <AxisGrid
+          maxX={maxX}
+          maxY={maxY}
+          xFormat={(v) => formatCompact(v)}
+          yFormat={yFormat}
+          yUnit={poolCostPerSecond !== null ? "$ / 1M tok" : "cost / tok"}
+        />
         {knee !== null && (
           <g>
             <line x1={knee} y1={PLOT.top} x2={knee} y2={PLOT.bottom} className="knee-line" />
@@ -2390,6 +2557,9 @@ function CostChart({ scenario, batchThreshold }: { scenario: ScenarioInputs; bat
       </svg>
       <p className="chart-caption">
         At small batches each user pays a full weight-fetch. The hyperbola flattens past the break-even batch — that flat line is the floor on per-token cost for this hardware.
+        {poolCostPerSecond !== null
+          ? ` Dollar axis assumes ${formatUsd(scenario.costPerGpuHour)}/GPU·hr × ${scenario.hardware.gpuCount} GPU${scenario.hardware.gpuCount === 1 ? "" : "s"}.`
+          : ""}
       </p>
     </article>
   );

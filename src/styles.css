@@ -1027,7 +1027,7 @@ button:focus-visible {
 
 .headline-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -1077,10 +1077,21 @@ button:focus-visible {
   background: rgba(169, 66, 50, 0.12);
 }
 
+@media (max-width: 960px) {
+  .headline-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 720px) {
   .headline-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* comparison table: "best $" badge next to the hardware label */
+td .badge {
+  margin-left: 8px;
 }
 
 .chart-grid {
