@@ -296,26 +296,29 @@ function App() {
   // Every enabled hardware preset, each evaluated at its OWN auto-tuned batch
   // (min of its HBM ceiling and break-even knee). Comparing all rows at the
   // batch tuned for the selected hardware would unfairly fail smaller pools.
-  // Each row uses its own market $/GPU·hour; the selected row uses the same
-  // effective price as the headline tile (i.e. the operator's override).
+  // The selected row keeps the planner's parallelism and effective price so
+  // it matches the headline tiles; every other row gets its own sensible
+  // defaults (EP = its full GPU count, PP = 1) and its own market price —
+  // inheriting the selected pool's EP would cripple bigger pools.
   const isDecoderForComparison = isDecoderArchitecture(model);
   const comparison = useMemo(
     () =>
       plannerHardwarePresets.map((item) => {
+        const selectedRow = item.id === hardware.id;
         const base = {
           contextTokens,
           weightBytesPerParam,
           kvBytesPerToken,
           tokensPerSecond,
           deploymentDays,
-          pipelineStages: Math.min(pipelineStages, item.gpuCount),
-          expertParallelism: Math.min(expertParallelism, item.gpuCount),
+          pipelineStages: selectedRow ? Math.min(pipelineStages, item.gpuCount) : 1,
+          expertParallelism: selectedRow ? Math.min(expertParallelism, item.gpuCount) : item.gpuCount,
           safetyMargin,
           pretrainTokens,
           rlTokens,
           rlInefficiency,
           inferenceInefficiency,
-          costPerGpuHour: item.id === hardware.id ? costPerGpuHour : item.costPerGpuHourUsd ?? 0,
+          costPerGpuHour: selectedRow ? costPerGpuHour : item.costPerGpuHourUsd ?? 0,
         };
         // maxFittingBatch and batchThreshold don't depend on batchSize, so one
         // probe pass gives the row's own optimal batch.
@@ -647,7 +650,7 @@ function App() {
               label="Batch (concurrent sequences)"
               value={batchSize}
               min={1}
-              max={Math.max(result.maxFittingBatch * 2, result.batchThreshold, 1024)}
+              max={Math.ceil(Math.max(result.maxFittingBatch * 2, result.batchThreshold, 1024))}
               step={1}
               onChange={setBatchSize}
               help="How many users are decoded together in one step. This is the only concurrency knob — vLLM's --max-num-seqs comes from here."
