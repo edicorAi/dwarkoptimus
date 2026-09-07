@@ -51,6 +51,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 1875,
     nativeComputeBytes: 0.5,
     interconnect: "single-node-nvlink",
+    costPerGpuHourUsd: 7.9,
     confidence: "user-provided",
     notes:
       "Your NVIDIA B300 server modeled as 8 Blackwell Ultra GPUs. Per-GPU values are derived from public GB300/B300 NVL72 rack totals.",
@@ -109,6 +110,7 @@ export const hardwarePresets: HardwarePreset[] = [
     flopsPerByte: 1875,
     nativeComputeBytes: 0.5,
     interconnect: "single-gpu",
+    costPerGpuHourUsd: 7.9,
     confidence: "estimated",
     notes: "Single B300-style reference derived from GB300 NVL72 rack totals.",
     sources: ["NVIDIA GB300 NVL72 public specs"],

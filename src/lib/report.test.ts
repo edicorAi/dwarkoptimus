@@ -34,7 +34,7 @@ describe("buildScenarioReport", () => {
     }
     // The vLLM command is wrapped in a fenced bash block
     expect(md).toContain("```bash");
-    expect(md).toContain("vllm serve qwen3-coder-next");
+    expect(md).toContain("vllm serve Qwen/Qwen3-Coder-Next");
     // Hardware label flows through
     expect(md).toContain(b300.label);
     // Verdict badge emoji

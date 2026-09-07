@@ -122,12 +122,17 @@ export function calculateScenario(input: ScenarioInputs): ScenarioResult {
     ? Math.max(computeSecondsAtBatch, (weightBytesTotal + kvBytesTotal) / bandwidthPool)
     : Number.NaN;
   const ttftSeconds = isDecoder ? safeDivide(input.contextTokens, prefillTokensPerSecond) : Number.NaN;
-  const costPerMillionTokensUsd = getCostPerMillionTokens({
-    costPerGpuHour: input.costPerGpuHour,
-    gpuCount: input.hardware.gpuCount,
-    stepSeconds: rooflineStepSeconds,
-    batchSize: input.batchSize,
-  });
+  // A batch that overflows HBM has no meaningful $/token — pricing it would
+  // contradict the fit verdict right next to it. NaN renders as "--".
+  const batchOverflowsHbm = isDecoder && Number.isFinite(maxFittingBatch) && input.batchSize > maxFittingBatch;
+  const costPerMillionTokensUsd = batchOverflowsHbm
+    ? Number.NaN
+    : getCostPerMillionTokens({
+        costPerGpuHour: input.costPerGpuHour,
+        gpuCount: input.hardware.gpuCount,
+        stepSeconds: rooflineStepSeconds,
+        batchSize: input.batchSize,
+      });
   // If the user left the manual tps override at the default, prefer the derived value
   // for the lifetime-tokens estimate so the Chinchilla figure is realistic.
   const tpsForLifetime =

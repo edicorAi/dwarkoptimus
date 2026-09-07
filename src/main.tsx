@@ -1088,7 +1088,8 @@ $ / 1M tok = that × 1,000,000`}</pre>
           throughput tiles. That keeps the headline tile, the chart, and the comparison table on
           one basis. It's an idealized roofline figure: real serving lands above it (scheduling,
           kernel efficiency, imperfect batching), so treat it as the physics floor, the same way
-          the rest of the calculator treats latency.
+          the rest of the calculator treats latency. When the selected batch doesn't fit in HBM,
+          the figure is deliberately undefined — a config that OOMs has no $/token.
         </p>
         <p>
           Where the rate comes from: presets with a real rental market carry an approximate
@@ -2062,7 +2063,9 @@ function HeadlineStats({
           <small>
             {Number.isFinite(result.costPerMillionTokensUsd)
               ? `at ${formatUsd(scenario.costPerGpuHour)}/GPU·hr × ${scenario.hardware.gpuCount} GPU${scenario.hardware.gpuCount === 1 ? "" : "s"} — roofline step at this batch`
-              : "set $ / GPU·hour in the controls to see cost"}
+              : scenario.costPerGpuHour > 0
+                ? "batch exceeds what fits at this context — no meaningful $/token"
+                : "set $ / GPU·hour in the controls to see cost"}
           </small>
         </div>
       </div>
@@ -2389,7 +2392,8 @@ function ComparisonTable({
       <p className="chart-caption">
         Each row picks its own batch (HBM ceiling capped at the break-even knee), so small pools aren't judged at a
         batch tuned for big ones. Rows without a $ figure have no rental-market estimate — set $/GPU·hour to price the
-        selected hardware. Sorted: verdict, then cheapest per token.
+        selected hardware. Throughput uses the HBM-drain cadence; $ uses the roofline step at that batch (see Docs →
+        Dollars per 1M tokens). Sorted: verdict, then cheapest per token.
       </p>
     </article>
   );

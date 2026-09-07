@@ -556,3 +556,16 @@ describe("vLLM serve model argument", () => {
     expect(getServeModelArg({ ...qwen, sources: ["Qwen3-Coder-Next model card"] })).toBe(qwen.label);
   });
 });
+
+describe("cost gating on fit", () => {
+  it("refuses to price a batch that overflows HBM", () => {
+    const probe = calculateScenario(buildScenario(b300, qwen, { batchSize: 1, costPerGpuHour: 3.6 }));
+    const overflowing = Math.floor(probe.maxFittingBatch) + 10;
+    const result = calculateScenario(buildScenario(b300, qwen, { batchSize: overflowing, costPerGpuHour: 3.6 }));
+    expect(result.costPerMillionTokensUsd).toBeNaN();
+    const fitting = calculateScenario(
+      buildScenario(b300, qwen, { batchSize: Math.floor(probe.maxFittingBatch), costPerGpuHour: 3.6 }),
+    );
+    expect(fitting.costPerMillionTokensUsd).toBeGreaterThan(0);
+  });
+});

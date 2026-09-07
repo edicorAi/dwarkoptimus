@@ -15,7 +15,7 @@ export const modelPresets: ModelPreset[] = [
     confidence: "source-backed",
     kvConfidence: "estimated",
     notes: "Maps to Qwen3-Next-80B-A3B: 80B total, 3B active, 262K context, 10 activated experts + 1 shared per token. Roughly half the layers use gated DeltaNet (linear attention) so real KV is below the dense estimate.",
-    sources: ["Qwen3-Coder-Next model card"],
+    sources: ["huggingface.co/Qwen/Qwen3-Coder-Next"],
   },
   {
     id: "kimi-k2.6",
