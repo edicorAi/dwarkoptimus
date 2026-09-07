@@ -23,6 +23,13 @@ import {
   storeHfToken,
   type HfSearchHit,
 } from "./lib/huggingface";
+import {
+  applySharedScenario,
+  decodeShareParams,
+  encodeShareParams,
+  hasShareParams,
+  STORAGE_PREFIX,
+} from "./lib/share";
 import { formatBytes, formatCompact, formatNumber, formatTime, formatUsd } from "./lib/units";
 import type { HardwareCategory, HardwarePreset, ModelPreset, PrecisionMode, ScenarioInputs, ServingPlan } from "./types";
 import "./styles.css";
@@ -144,7 +151,8 @@ const hardwareCategoryLabel: Record<HardwareCategory, string> = {
 // useState initializer reads synchronously, so there's no flash of default
 // values on mount. Failures (quota, private-browsing) are swallowed — the
 // app keeps working, the user just doesn't get persistence that session.
-const STORAGE_PREFIX = "dwarkoptimus.";
+// STORAGE_PREFIX lives in lib/share.ts so the share-link codec writes the
+// exact keys these hooks read.
 
 function useLocalStorageState<T>(key: string, defaultValue: T): [T, React.Dispatch<React.SetStateAction<T>>] {
   const fullKey = STORAGE_PREFIX + key;
@@ -183,8 +191,29 @@ function groupHardwareByCategory(presets: HardwarePreset[]): Array<{ category: H
     .map((category) => ({ category, items: buckets.get(category)! }));
 }
 
+const defaultHardwareIds = ["dell-b300-8gpu", "h200-pool-16gpu", "h200-server-4gpu"];
+
+// Apply a shared scenario from the URL (if any) BEFORE the App mounts, so the
+// useLocalStorageState initializers pick the values up synchronously. The
+// query is stripped afterwards — localStorage owns the state from then on.
+try {
+  const sharedParams = new URLSearchParams(window.location.search);
+  if (hasShareParams(sharedParams)) {
+    applySharedScenario(decodeShareParams(sharedParams), window.localStorage, {
+      knownHardwareIds: new Set(hardwarePresets.map((item) => item.id)),
+      knownModelIds: new Set([
+        ...modelPresets.map((item) => item.id),
+        ...loadCachedHfPresets().map((item) => item.id),
+      ]),
+      defaultEnabledHardwareIds: defaultHardwareIds,
+    });
+    window.history.replaceState(null, "", window.location.pathname + window.location.hash);
+  }
+} catch {
+  // A malformed URL or blocked storage must never prevent the app from loading.
+}
+
 function App() {
-  const defaultHardwareIds = ["dell-b300-8gpu", "h200-pool-16gpu", "h200-server-4gpu"];
   const [activeTab, setActiveTab] = useLocalStorageState<AppTab>("activeTab", "planner");
   const [hardwareId, setHardwareId] = useLocalStorageState("hardwareId", "dell-b300-8gpu");
   const [enabledHardwareIds, setEnabledHardwareIds] = useLocalStorageState<string[]>("enabledHardwareIds", defaultHardwareIds);
@@ -410,6 +439,28 @@ function App() {
 
   function buildReport(): string {
     return buildScenarioReport({ hardware, model, scenario, result, plan: servingPlan });
+  }
+
+  function buildShareUrl(): string {
+    const params = encodeShareParams({
+      hardwareId: hardware.id,
+      modelId: model.id,
+      precision,
+      customWeightBytes: precision === "custom" ? customWeightBytes : undefined,
+      contextTokens,
+      batchSize,
+      autoTuneBatch,
+      kvBytesPerToken,
+      kCacheType,
+      vCacheType,
+      pipelineStages,
+      expertParallelism,
+      safetyMargin,
+      deploymentDays,
+      tokensPerSecond: tokensPerSecond > 0 ? tokensPerSecond : undefined,
+      costPerGpuHour: costPerGpuHourOverride > 0 ? costPerGpuHourOverride : undefined,
+    });
+    return `${window.location.origin}${window.location.pathname}?${params.toString()}`;
   }
 
   function copyReport() {
@@ -790,6 +841,7 @@ function App() {
               result={result}
               onCopyReport={copyReport}
               onDownloadReport={downloadReport}
+              getShareUrl={buildShareUrl}
             />
           </section>
         </section>
@@ -1318,6 +1370,21 @@ $ / 1M tok = that × 1,000,000`}</pre>
         </p>
       </DocSection>
 
+      <DocSection id="share" title="Share links">
+        <p>
+          <strong>🔗 Share scenario</strong> (next to the report buttons) copies a URL that
+          reopens this exact scenario — hardware, model, context, batch, precision, KV settings,
+          parallelism, safety margin, and cost rate — on any machine. Opening a share link
+          switches to the Planner, applies the settings, and enables the shared hardware in the
+          recipient's inventory if it wasn't already.
+        </p>
+        <p>
+          One caveat: models imported from Hugging Face live only in the sender's browser. A
+          share link that references one falls back to the recipient's current model — re-import
+          the repo on the receiving side to compare like for like.
+        </p>
+      </DocSection>
+
       <DocSection id="confidence" title="Confidence badges">
         <p>Each model and hardware preset carries one of four confidence levels:</p>
         <dl className="docs-dl">
@@ -1424,6 +1491,7 @@ function DocsToc() {
     ["vllm-command", "vLLM command"],
     ["hf-import", "Hugging Face import"],
     ["report", "Markdown report"],
+    ["share", "Share links"],
     ["confidence", "Confidence badges"],
     ["glossary", "Glossary"],
     ["sources", "Sources"],
@@ -2571,18 +2639,38 @@ function Assumptions({
   result,
   onCopyReport,
   onDownloadReport,
+  getShareUrl,
 }: {
   hardware: HardwarePreset;
   model: ModelPreset;
   result: ReturnType<typeof calculateScenario>;
   onCopyReport: () => void;
   onDownloadReport: () => void;
+  getShareUrl: () => string;
 }) {
+  const [shareCopied, setShareCopied] = useState(false);
+  const shareResetRef = useRef<number | null>(null);
+
+  function copyShareLink() {
+    void navigator.clipboard?.writeText(getShareUrl());
+    setShareCopied(true);
+    if (shareResetRef.current !== null) window.clearTimeout(shareResetRef.current);
+    shareResetRef.current = window.setTimeout(() => setShareCopied(false), 2000);
+  }
+
   return (
     <article className="panel assumptions">
       <div className="panel-heading">
         <h2>Assumptions and warnings</h2>
         <div className="report-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={copyShareLink}
+            title="Copy a URL that reopens this exact scenario — hardware, model, and every knob"
+          >
+            {shareCopied ? "✓ Link copied" : "🔗 Share scenario"}
+          </button>
           <button type="button" className="secondary-button" onClick={onCopyReport}>
             Copy report
           </button>
