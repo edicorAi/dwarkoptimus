@@ -1,12 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   deriveKvBytesPerToken,
   derivePresetFromHfConfig,
   dtypeToBytes,
   estimateActiveParams,
   estimateTotalParams,
+  loadWeightBytesOnDisk,
   normalizeHfConfig,
   quantBytesPerParam,
+  snapBytesPerParam,
   type HfModelConfig,
 } from "./huggingface";
 
@@ -80,6 +82,28 @@ const deepseekV4Config: HfModelConfig = {
   torch_dtype: "bfloat16",
 };
 
+// DeepSeek-V4.1-Flash-style config: transformers v5 `dtype` key (no
+// torch_dtype), CED/CSA2 cross-layer KV sharing (only 4 KV-source layers),
+// Engram tables, and a mixed fp8+fp4 quantized checkpoint.
+const deepseekV41Config: HfModelConfig = {
+  model_type: "deepseek_v41_text",
+  num_hidden_layers: 40,
+  hidden_size: 5120,
+  num_attention_heads: 64,
+  num_key_value_heads: 1,
+  head_dim: 512,
+  qk_rope_head_dim: 64,
+  n_routed_experts: 384,
+  num_experts_per_tok: 6,
+  moe_intermediate_size: 2304,
+  max_position_embeddings: 1048576,
+  dtype: "bfloat16",
+  index_topk: 512,
+  kv_source_layer_ids: [2, 8, 14, 20],
+  engram_num_embeddings: [384006168, 384016682],
+  quantization_config: { quant_method: "fp8" },
+};
+
 // MiniMax-M3-style multimodal wrapper: decoder nested under text_config.
 const minimaxWrapperConfig: HfModelConfig = {
   model_type: "minimax_m3_vl",
@@ -150,6 +174,18 @@ describe("deriveKvBytesPerToken", () => {
   it("derives GQA KV from a flattened multimodal wrapper", () => {
     // 2 × 60 × 4 × 128 × 2 = 122,880
     expect(deriveKvBytesPerToken(normalizeHfConfig(minimaxWrapperConfig))).toBe(122880);
+  });
+
+  it("counts only KV-source layers under CED/CSA2 sharing and reads the v5 dtype key", () => {
+    // 4 source layers × (512 + 64) × 2 = 4,608 — NOT 40 layers × 576 × 2 ≈ 46 KB.
+    // DeepSeek publishes 890 B/tok (FP4 KV on top); 4.6 KB is the F16 baseline.
+    expect(deriveKvBytesPerToken(deepseekV41Config)).toBe(4608);
+  });
+
+  it("reads transformers v5 `dtype` when torch_dtype is absent", () => {
+    const config: HfModelConfig = { ...llama3Config, torch_dtype: undefined, dtype: "float32" };
+    // fp32 KV: 2 × 32 × 8 × 128 × 4 = 262,144
+    expect(deriveKvBytesPerToken(config)).toBe(262144);
   });
 });
 
@@ -237,5 +273,98 @@ describe("derivePresetFromHfConfig", () => {
     expect(preset.contextTokens).toBe(1048576);
     expect(preset.kvBytesPerToken).toBe(122880);
     expect(preset.kvConfidence).toBe("source-backed");
+  });
+
+  it("sizes a mixed-precision repo from its on-disk bytes, not the fp8 quant tag", () => {
+    // Real DeepSeek-V4.1-Flash figures: 763.2B params, 510.3 GB of safetensors
+    // (fp8 attention + fp4 experts). Flat fp8 pricing would claim 763 GB.
+    const preset = derivePresetFromHfConfig(
+      "deepseek-ai/DeepSeek-V4.1-Flash",
+      deepseekV41Config,
+      763.2e9,
+      510.3e9,
+    );
+    expect(preset.defaultWeightBytesPerParam).toBeCloseTo(0.6686, 4);
+    expect(preset.totalParams * preset.defaultWeightBytesPerParam).toBeCloseTo(510.3e9, -9);
+    // Shared-KV architectures are modeled, not literal — never source-backed.
+    expect(preset.kvConfidence).toBe("estimated");
+    expect(preset.notes).toContain("GB on disk");
+    expect(preset.notes).toContain("Engram");
+  });
+
+  it("keeps the quant-config width when disk size is unavailable", () => {
+    const preset = derivePresetFromHfConfig("deepseek-ai/DeepSeek-V4.1-Flash", deepseekV41Config, 763.2e9);
+    expect(preset.defaultWeightBytesPerParam).toBe(1);
+  });
+});
+
+describe("snapBytesPerParam", () => {
+  it("snaps near-standard widths so ordinary repos keep a named precision", () => {
+    expect(snapBytesPerParam(2.0002)).toBe(2); // bf16 + safetensors headers
+    expect(snapBytesPerParam(1.015)).toBe(1); // fp8 with bf16 embeddings
+    expect(snapBytesPerParam(0.505)).toBe(0.5);
+  });
+
+  it("keeps genuinely mixed layouts exact", () => {
+    expect(snapBytesPerParam(0.6686)).toBe(0.6686);
+    // Deliberate: an fp8 repo with bf16 embeddings/lm_head (≈13% of params on
+    // an 8B model) imports as Custom 1.13, not "FP8". Accuracy over the badge —
+    // calling 1.13 B/param "1" undercuts the fit verdict by 13%.
+    expect(snapBytesPerParam(1.13)).toBe(1.13);
+    expect(snapBytesPerParam(1.25)).toBe(1.25);
+  });
+});
+
+describe("loadWeightBytesOnDisk", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function treeResponse(entries: unknown[], nextUrl?: string): Response {
+    return {
+      ok: true,
+      headers: { get: (name: string) => (name === "link" && nextUrl ? `<${nextUrl}>; rel="next"` : null) },
+      json: async () => entries,
+    } as unknown as Response;
+  }
+
+  it("sums .safetensors sizes and ignores other files", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        treeResponse([
+          { path: "model-00001-of-00002.safetensors", size: 5e9 },
+          { path: "model-00002-of-00002.safetensors", size: 3e9 },
+          { path: "README.md", size: 12345 },
+          { path: "tokenizer.json", size: 2e6 },
+        ]),
+      ),
+    );
+    await expect(loadWeightBytesOnDisk("org/model")).resolves.toBe(8e9);
+  });
+
+  it("follows Link-header pagination", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        treeResponse([{ path: "a.safetensors", size: 1e9 }], "https://huggingface.co/api/models/org/model/tree/main?cursor=abc"),
+      )
+      .mockResolvedValueOnce(treeResponse([{ path: "b.safetensors", size: 2e9 }]));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(loadWeightBytesOnDisk("org/model")).resolves.toBe(3e9);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns undefined when the repo has no safetensors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => treeResponse([{ path: "model.gguf", size: 4e9 }])));
+    await expect(loadWeightBytesOnDisk("org/model")).resolves.toBeUndefined();
+  });
+
+  it("refuses a partial sum when a full page arrives without a next link", async () => {
+    // A hidden Link header (not CORS-exposed) on a >1000-file repo would
+    // otherwise silently under-count the weights.
+    const fullPage = Array.from({ length: 1000 }, (_, i) => ({ path: `shard-${i}.safetensors`, size: 1e9 }));
+    vi.stubGlobal("fetch", vi.fn(async () => treeResponse(fullPage)));
+    await expect(loadWeightBytesOnDisk("org/model")).resolves.toBeUndefined();
   });
 });

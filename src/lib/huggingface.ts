@@ -61,6 +61,8 @@ export type HfModelConfig = {
   vocab_size?: number;
   max_position_embeddings?: number;
   torch_dtype?: string;
+  // transformers v5 renamed torch_dtype → dtype; new configs carry only this.
+  dtype?: string;
   tie_word_embeddings?: boolean;
   intermediate_size?: number;
   // MoE: different vendors use different keys; we read whatever exists.
@@ -76,6 +78,12 @@ export type HfModelConfig = {
   // DSA-style sparse-attention indexer (DeepSeek V4, GLM 5.x): adds a small
   // per-layer index cache our formula does not count.
   index_topk?: number;
+  // CED/CSA2 cross-layer KV sharing (DeepSeek V4.1): only these layers hold a
+  // global KV cache — every other layer reuses or re-indexes it.
+  kv_source_layer_ids?: number[];
+  // Engram conditional memory (DeepSeek V4.1): huge sparsely-accessed lookup
+  // tables that ship inside the safetensors and count toward weight memory.
+  engram_num_embeddings?: number[];
   // Multimodal wrappers (Qwen3-VL, MiniMax M3, Kimi K2.7) nest the decoder
   // config; we flatten it in normalizeHfConfig before deriving anything.
   text_config?: HfModelConfig;
@@ -120,6 +128,38 @@ export async function loadSafetensorsTotal(repoId: string, options: HfRequestOpt
   return data.safetensors?.total;
 }
 
+type HfTreeEntry = { path?: string; size?: number };
+
+// Sum of the .safetensors file sizes on the repo — the only number that is
+// right for mixed-precision checkpoints (DeepSeek V4.1 ships fp8 attention +
+// fp4 experts + block scales; params × any single bytes/param misses by ~50%).
+// What's on disk is what vLLM loads into HBM. Follows the API's Link-header
+// pagination for repos with >1000 files.
+export async function loadWeightBytesOnDisk(repoId: string, options: HfRequestOptions = {}): Promise<number | undefined> {
+  let url: string | null = `${HF_API}/models/${encodeRepoId(repoId)}/tree/main?recursive=true`;
+  let total = 0;
+  let sawWeights = false;
+  for (let page = 0; url && page < 25; page++) {
+    const res: Response = await fetch(url, { signal: options.signal, headers: authHeaders(options.token) });
+    if (!res.ok) return undefined;
+    const entries = (await res.json()) as HfTreeEntry[];
+    if (!Array.isArray(entries)) return undefined;
+    for (const entry of entries) {
+      if (entry.path?.endsWith(".safetensors")) {
+        total += entry.size ?? 0;
+        sawWeights = true;
+      }
+    }
+    const link = res.headers.get("link");
+    url = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+    // The API pages at 1000 entries. A full page with no next link means the
+    // Link header was withheld (e.g. not CORS-exposed) — a partial sum would
+    // silently under-count, which is worse than falling back to the quant tag.
+    if (!url && entries.length >= 1000) return undefined;
+  }
+  return sawWeights && total > 0 ? total : undefined;
+}
+
 const TOKEN_KEY = "dwarkoptimus.hf-token";
 
 export function loadStoredHfToken(): string {
@@ -151,11 +191,13 @@ export function dtypeToBytes(dtype?: string): number {
 //   2. MLA in MQA-absorbed form (DeepSeek V4: one KV head whose head_dim IS the
 //      latent): layers × (head_dim + qk_rope_head_dim).
 //   3. GQA/MHA: 2 (K and V) × layers × kv_heads × head_dim.
+// "layers" means KV-holding layers: with CED/CSA2 sharing (DeepSeek V4.1) only
+// kv_source_layer_ids hold a global cache — counting all layers is ~10× high.
 // All at dtype_bytes from torch_dtype — vLLM serves KV at the model's dtype
 // unless the operator overrides with --kv-cache-dtype.
 export function deriveKvBytesPerToken(config: HfModelConfig): number {
-  const layers = config.num_hidden_layers ?? 0;
-  const dtypeBytes = dtypeToBytes(config.torch_dtype);
+  const layers = config.kv_source_layer_ids?.length || config.num_hidden_layers || 0;
+  const dtypeBytes = dtypeToBytes(config.torch_dtype ?? config.dtype);
   if (!layers) return 0;
   if (config.kv_lora_rank) {
     return layers * (config.kv_lora_rank + (config.qk_rope_head_dim ?? 0)) * dtypeBytes;
@@ -210,6 +252,17 @@ export function estimateActiveParams(config: HfModelConfig, totalParams: number)
   return Math.max(moeActive, totalParams * 0.1 * (activated / numExperts) + moeActive);
 }
 
+// Disk-bytes ÷ params lands a hair off the standard widths on ordinary repos
+// (safetensors headers, fp32 norms, bf16 embeddings on fp8 checkpoints). Snap
+// within 2% so those keep their named precision mode; genuinely mixed layouts
+// (DeepSeek V4.1 ≈ 0.67) stay exact and surface as Custom.
+export function snapBytesPerParam(ratio: number): number {
+  for (const standard of [0.5, 1, 2, 4]) {
+    if (Math.abs(ratio - standard) / standard <= 0.02) return standard;
+  }
+  return Math.round(ratio * 1e4) / 1e4;
+}
+
 // Quantized repos (AWQ/GPTQ/NVFP4/MXFP4/FP8) keep torch_dtype at bf16, so the
 // real on-disk weight width lives in quantization_config instead.
 export function quantBytesPerParam(config: HfModelConfig): number | undefined {
@@ -225,8 +278,9 @@ export function derivePresetFromHfConfig(
   repoId: string,
   config: HfModelConfig,
   knownTotalParams?: number,
+  weightBytesOnDisk?: number,
 ): ModelPreset {
-  const dtypeBytes = quantBytesPerParam(config) ?? dtypeToBytes(config.torch_dtype);
+  const dtypeBytes = quantBytesPerParam(config) ?? dtypeToBytes(config.torch_dtype ?? config.dtype);
   const kvBytesPerToken = deriveKvBytesPerToken(config);
   const isMoE = expertCount(config) > 1;
   // Multimodal decoders still deserve full decode/KV math — the `vlm`
@@ -234,10 +288,24 @@ export function derivePresetFromHfConfig(
   const architecture = isMoE ? "moe" : "dense";
   const totalParams = knownTotalParams ?? estimateTotalParams(config);
   const activeParams = estimateActiveParams(config, totalParams);
-  const defaultBytesPerParam: 0.5 | 1 | 2 = dtypeBytes <= 0.5 ? 0.5 : dtypeBytes <= 1 ? 1 : 2;
+  // Prefer the exact on-disk size: mixed-precision repos (fp8 attention + fp4
+  // experts) don't reduce to any single standard width, and totalParams ×
+  // (diskBytes / totalParams) reproduces the disk footprint exactly.
+  const defaultBytesPerParam =
+    weightBytesOnDisk && totalParams > 0
+      ? snapBytesPerParam(weightBytesOnDisk / totalParams)
+      : dtypeBytes <= 0.5
+        ? 0.5
+        : dtypeBytes <= 1
+          ? 1
+          : 2;
   // DSA-style sparse attention adds a per-layer indexer cache our formula
   // skips, so those models get "estimated" rather than "source-backed".
   const hasIndexerCache = Boolean(config.index_topk);
+  // CED/CSA2 KV sharing: our per-source-layer count is a modeled approximation
+  // of the published footprint, not a literal config read.
+  const hasSharedKv = (config.kv_source_layer_ids?.length ?? 0) > 0;
+  const hasEngram = (config.engram_num_embeddings?.length ?? 0) > 0;
   return {
     id: `hf:${repoId}`,
     label: repoId,
@@ -250,9 +318,18 @@ export function derivePresetFromHfConfig(
     activatedExperts: isMoE ? config.num_experts_per_tok : undefined,
     approxLayers: config.num_hidden_layers,
     confidence: knownTotalParams ? "source-backed" : "estimated",
-    kvConfidence: kvBytesPerToken > 0 ? (hasIndexerCache ? "estimated" : "source-backed") : "unknown",
+    kvConfidence:
+      kvBytesPerToken > 0 ? (hasIndexerCache || hasSharedKv ? "estimated" : "source-backed") : "unknown",
     notes: `Imported from huggingface.co/${repoId}. KV size derived from config.json attention shape (MLA-aware).${
-      hasIndexerCache ? " Sparse-attention indexer cache not counted — treat KV as a floor." : ""
+      hasSharedKv ? " Cross-layer KV sharing detected — only KV-source layers counted." : ""
+    }${hasIndexerCache ? " Sparse-attention indexer cache not counted — treat KV as a floor." : ""}${
+      weightBytesOnDisk
+        ? ` Weights: ${(weightBytesOnDisk / 1e9).toFixed(0)} GB on disk (${defaultBytesPerParam} B/param).`
+        : ""
+    }${
+      hasEngram
+        ? " Includes Engram lookup tables; vLLM keeps them in GPU memory (some runtimes can host-offload them)."
+        : ""
     }${knownTotalParams ? "" : " Total params estimated from architecture; verify before production."}`,
     sources: [`https://huggingface.co/${repoId}/blob/main/config.json`],
   };

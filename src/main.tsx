@@ -18,6 +18,7 @@ import {
   loadCachedHfPresets,
   loadModelConfig,
   loadSafetensorsTotal,
+  loadWeightBytesOnDisk,
   loadStoredHfToken,
   searchModels,
   storeHfToken,
@@ -113,6 +114,17 @@ function isPrecisionSupported(mode: PrecisionMode, hardware: HardwarePreset): bo
 function defaultPrecisionForHardware(hardware: HardwarePreset): PrecisionMode {
   const ordered: PrecisionMode[] = ["fp4", "fp8", "bf16"];
   return ordered.find((mode) => isPrecisionSupported(mode, hardware)) ?? "bf16";
+}
+
+// Map a preset's bytes/param to a precision mode. Mixed-precision checkpoints
+// (DeepSeek V4.1 ships fp8 attention + fp4 experts ≈ 0.67 B/param) match no
+// standard width and must land on Custom — snapping "≤1" to fp8 would inflate
+// their weight footprint by ~50%. Callers set customWeightBytes alongside.
+function precisionForWeightBytes(bytes: number, hardware: HardwarePreset): PrecisionMode {
+  const standard: PrecisionMode | undefined =
+    bytes === 0.5 ? "fp4" : bytes === 1 ? "fp8" : bytes === 2 ? "bf16" : undefined;
+  if (!standard) return "custom";
+  return isPrecisionSupported(standard, hardware) ? standard : defaultPrecisionForHardware(hardware);
 }
 
 // Display order + label for hardware categories. Used to group both the
@@ -412,9 +424,7 @@ function App() {
     setBatchSize(defaultServingBatch);
     // The model's default precision may not be natively supported by the
     // current hardware (e.g. an fp4 model on Hopper) — clamp like applyHardware does.
-    const preferred: PrecisionMode =
-      next.defaultWeightBytesPerParam <= 0.5 ? "fp4" : next.defaultWeightBytesPerParam <= 1 ? "fp8" : "bf16";
-    setPrecision(isPrecisionSupported(preferred, hardware) ? preferred : defaultPrecisionForHardware(hardware));
+    setPrecision(precisionForWeightBytes(next.defaultWeightBytesPerParam, hardware));
     setCustomWeightBytes(next.defaultWeightBytesPerParam);
     setOptimizeNotes(null);
   }
@@ -612,13 +622,7 @@ function App() {
                 setKCacheType("f16");
                 setVCacheType("f16");
                 setBatchSize(defaultServingBatch);
-                const preferred: PrecisionMode =
-                  preset.defaultWeightBytesPerParam <= 0.5
-                    ? "fp4"
-                    : preset.defaultWeightBytesPerParam <= 1
-                      ? "fp8"
-                      : "bf16";
-                setPrecision(isPrecisionSupported(preferred, hardware) ? preferred : defaultPrecisionForHardware(hardware));
+                setPrecision(precisionForWeightBytes(preset.defaultWeightBytesPerParam, hardware));
                 setCustomWeightBytes(preset.defaultWeightBytesPerParam);
               }}
               onForget={(presetId) => {
@@ -1880,11 +1884,12 @@ function HuggingFaceSearch({
     setError(null);
     setErrorRepoId(null);
     try {
-      const [config, knownTotal] = await Promise.all([
+      const [config, knownTotal, weightBytesOnDisk] = await Promise.all([
         loadModelConfig(repoId, { token: token || undefined }),
         loadSafetensorsTotal(repoId, { token: token || undefined }).catch(() => undefined),
+        loadWeightBytesOnDisk(repoId, { token: token || undefined }).catch(() => undefined),
       ]);
-      const preset = derivePresetFromHfConfig(repoId, config, knownTotal);
+      const preset = derivePresetFromHfConfig(repoId, config, knownTotal, weightBytesOnDisk);
       onImport(preset);
       setResults([]);
       setQuery("");
